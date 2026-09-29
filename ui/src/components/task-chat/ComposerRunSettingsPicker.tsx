@@ -166,11 +166,16 @@ export function ComposerRunSettingsPicker({
   };
   const reset = () => onSettingsChange(DEFAULT_COMPOSER_RUN_SETTINGS);
   const closeButton = mobile ? <DialogClose asChild><button type="button" aria-label="Close picker" className="grid size-8 place-items-center rounded-md text-muted-foreground hover:bg-accent"><X className="size-4" /></button></DialogClose> : null;
-  const trigger = <button ref={triggerRef} type="button" disabled={disabled} aria-label="Select assignee, model and effort" data-testid="task-chat-composer-assignee"
-    className="flex h-8 min-w-0 max-w-64 items-center gap-1.5 rounded-full bg-muted px-2.5 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+  const assigneeTriggerLabel = assigneeOptions.find((item) => item.id === assigneeValue)?.label ?? "Unassigned";
+  const modelTriggerLabel = modelSupported ? modelName || "Harness default" : "Harness default";
+  const triggerTitle = [assigneeTriggerLabel, modelTriggerLabel, effort ? effortLabel : null]
+    .filter(Boolean)
+    .join(" · ");
+  const trigger = <button ref={triggerRef} type="button" disabled={disabled} aria-label="Select assignee, model and effort" title={triggerTitle} data-testid="task-chat-composer-assignee"
+    className="flex h-8 min-w-0 max-w-72 items-center gap-1.5 rounded-full bg-muted px-2.5 text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
     {renderAssigneeIdentity?.(assigneeValue, agent?.name ?? "Unassigned", "trigger")}
-    <span className="max-w-24 truncate">{assigneeOptions.find((item) => item.id === assigneeValue)?.label ?? "Unassigned"}</span>
-    <span className="text-muted-foreground" aria-hidden>·</span><span className="min-w-0 truncate text-muted-foreground">{modelSupported ? modelName || "Harness default" : "Harness default"}</span>
+    <span className="min-w-0 shrink-0 max-w-32 truncate">{assigneeTriggerLabel}</span>
+    <span className="shrink-0 text-muted-foreground" aria-hidden>·</span><span className="min-w-0 truncate text-muted-foreground">{modelTriggerLabel}</span>
     {effort ? <span className="hidden shrink-0 text-muted-foreground sm:inline">{effortLabel}</span> : null}
     <ChevronDown className="size-3 shrink-0 text-muted-foreground" aria-hidden />
   </button>;
