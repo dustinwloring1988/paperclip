@@ -27,6 +27,16 @@ export function appDefinitionDarkLogoUrl(entry: AppGalleryDisplayEntry | null | 
   return entry?.branding?.darkLogoUrl;
 }
 
+/**
+ * Brand accent for the connector brand badge. Only a real hex from the catalog
+ * counts; anything else falls back to null so the badge can render its neutral
+ * token treatment instead of painting a broken value.
+ */
+export function appDefinitionAccentColor(entry: AppGalleryDisplayEntry | null | undefined): string | null {
+  const accent = entry?.branding?.accentColor?.trim();
+  return accent && /^#[0-9a-fA-F]{3,8}$/.test(accent) ? accent : null;
+}
+
 export function appApplicationSourceSlug(application: ToolApplication | null | undefined): string | null {
   if (!application) return null;
   const metadata = application.metadata;
