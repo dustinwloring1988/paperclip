@@ -7,9 +7,11 @@
     "analytics"
   ],
   "featured": true,
+  "developerChoice": true,
   "branding": {
     "logoUrl": "/brands/apps/posthog.svg",
-    "darkLogoUrl": "/brands/apps/posthog-dark.svg"
+    "darkLogoUrl": "/brands/apps/posthog-dark.svg",
+    "accentColor": "#F54E00"
   },
   "urlPatterns": [
     "https://mcp.posthog.com/*"

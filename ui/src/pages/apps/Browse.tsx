@@ -25,6 +25,8 @@ import {
   aiSubscriptionNeedsIsolatedLogin,
 } from "@paperclipai/shared";
 import { useNavigate } from "@/lib/router";
+import { cn } from "@/lib/utils";
+import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { useChatConnectorsEnabled } from "@/hooks/useChatConnectorsEnabled";
 import { useMemoryConnectorsEnabled } from "@/hooks/useMemoryConnectorsEnabled";
 import { appCopyFor } from "@/lib/app-gallery-copy";
@@ -63,6 +65,7 @@ import { buildCompanyUserProfileMap } from "@/lib/company-members";
 import { AppLogo } from "./AppLogo";
 import {
   appApplicationSourceSlug,
+  appDefinitionAccentColor,
   appDefinitionDarkLogoUrl,
   appDefinitionDescription,
   appDefinitionLogoUrl,
@@ -90,6 +93,8 @@ type ConnectorRowModel = {
   brandKey: string;
   logoUrl?: string | null;
   darkLogoUrl?: string | null;
+  /** Brand hex from the catalog, used only for the brand badge. */
+  accentColor?: string | null;
   entry: AppGalleryDisplayEntry | null;
   applications: ToolApplication[];
   connections: ToolConnection[];
@@ -423,6 +428,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
         brandKey: slug,
         logoUrl: appDefinitionLogoUrl(entry),
         darkLogoUrl: appDefinitionDarkLogoUrl(entry),
+        accentColor: appDefinitionAccentColor(entry),
         entry,
         applications: [],
         connections: [],
@@ -474,6 +480,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
         name: item.name,
         description: item.description,
         brandKey: item.provider,
+        accentColor: null,
         entry: null,
         applications: [],
         connections: [],
@@ -533,6 +540,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
           application.description ??
           "A custom connector configured for this organization.",
         brandKey: applicationSlug ?? application.name,
+        accentColor: null,
         entry: null,
         applications: [application],
         connections: appConnections,
@@ -563,6 +571,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
           name: names[endpoint.provider],
           description: `Chat with agents through ${names[endpoint.provider]}.`,
           brandKey: endpoint.provider,
+          accentColor: null,
           entry: null,
           applications: [],
           connections: [],
@@ -639,7 +648,7 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
   const nothingMatches = visibleRows.length === 0 && !showCustomConnector;
 
   return (
-    <div className="max-w-5xl space-y-5 pb-12">
+    <div className="space-y-5 pb-12">
       <header className="flex justify-start">
         <div className="relative w-full max-w-md">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -692,7 +701,11 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
           No connectors match “{query.trim()}”.
         </p>
       ) : (
-        <div className="space-y-3" role="list" aria-label="Connector list">
+        <div
+          role="list"
+          aria-label="Connector list"
+          className="grid items-start gap-3 [grid-template-columns:repeat(auto-fill,minmax(19rem,1fr))]"
+        >
           {visibleRows.map((row) => (
             <ConnectorCard
               renderAccountDetails={renderAccountDetails}
@@ -780,18 +793,23 @@ export function ConnectorCard({
     chatConnectorsEnabled,
     preselectedAgentId,
   );
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  const connectedCount =
+    row.connections.length + row.chatEndpoints.length;
+  const showAccounts =
+    row.connections.length > 0 || row.chatEndpoints.length > 0;
+
   return (
     <div
       role="listitem"
       data-app-slug={row.slug}
-      data-connected={
-        row.connections.length > 0 || row.chatEndpoints.length > 0
-          ? "true"
-          : "false"
-      }
-      className="overflow-hidden rounded-xl border border-border"
+      data-connected={connectedCount > 0 ? "true" : "false"}
+      // Grid-safe: h-full lets the footer pin to the bottom of its row via
+      // mt-auto, so every card in a column lines up regardless of how much
+      // description text it carries.
+      className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-card"
     >
-      <div className="flex flex-wrap items-center gap-3 px-4 py-4">
+      <div className="flex items-start gap-3 p-4">
         <AppLogo
           name={row.name}
           brandKey={row.brandKey}
@@ -801,10 +819,25 @@ export function ConnectorCard({
         />
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold text-foreground">{row.name}</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
+          {/* Reserve two lines so cards line up even without a description. */}
+          <p className="mt-0.5 line-clamp-2 min-h-8 text-xs text-muted-foreground">
             {row.description}
           </p>
         </div>
+      </div>
+
+      {row.accentColor ? (
+        <div className="px-4 pb-3">
+          <ConnectorBrandBadge name={row.name} accentColor={row.accentColor} />
+        </div>
+      ) : null}
+
+      <div className="mt-auto flex items-center justify-between gap-2 border-t border-border px-4 py-2.5">
+        <span className="min-w-0 truncate text-xs text-muted-foreground">
+          {connectedCount > 0
+            ? `${connectedCount} ${connectedCount === 1 ? "account" : "accounts"} connected`
+            : "Not connected"}
+        </span>
         <Button
           type="button"
           size="sm"
@@ -820,110 +853,178 @@ export function ConnectorCard({
         </Button>
       </div>
 
-      {row.connections.length > 0 ? (
-        <div className="divide-y divide-border border-t border-border">
-          {row.connections.map((connection) => (
-            <ConnectionAccountRow
-              details={renderAccountDetails?.(connection)}
-              key={connection.id}
-              row={row}
-              connection={connection}
-              owner={connectionOwnerProfile(connection, userProfileById)}
-              onNavigate={onNavigate}
-              onRemove={() => {
-                const accountName = connectionDisplayNameForOwner(
-                  connection,
-                  row.name,
-                  connectionOwnerProfile(connection, userProfileById),
-                );
-                onRequestRemove({
-                  id: connection.id,
-                  accountName,
-                  providerName: row.name,
-                  remainingConnectionCount: row.connections.filter(
-                    (candidate) =>
-                      candidate.id !== connection.id &&
-                      candidate.status === "active" &&
-                      candidate.enabled,
-                  ).length,
-                });
-              }}
+      {showAccounts ? (
+        <div className="border-t border-border">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-2 px-4 py-2 text-left text-xs font-medium text-muted-foreground hover:bg-muted/40"
+            aria-expanded={accountsOpen}
+            onClick={() => setAccountsOpen((open) => !open)}
+          >
+            <span>
+              {accountsOpen ? "Hide" : "Show"} connected{" "}
+              {connectedCount === 1 ? "account" : "accounts"}
+            </span>
+            <ChevronRight
+              className={cn(
+                "h-4 w-4 shrink-0 transition-transform",
+                accountsOpen && "rotate-90",
+              )}
             />
-          ))}
-        </div>
-      ) : null}
-      {row.chatEndpoints.length > 0 ? (
-        <div className="divide-y divide-border border-t border-border">
-          {row.chatEndpoints.map((endpoint) => (
-            <div
-              key={endpoint.id}
-              className="flex flex-wrap items-center gap-3 px-4 py-3"
-            >
-              <div className="min-w-0 flex-1">
-                <button
-                  type="button"
-                  className="truncate text-left text-sm font-medium hover:underline"
-                  onClick={() =>
-                    onNavigate(`/apps/chat/${endpoint.id}/settings`)
-                  }
-                >
-                  {endpoint.assignedAgentName} · {endpoint.provider === "agentmail" ? "Email" : "Chat"}
-                </button>
-                <p className="truncate text-xs text-muted-foreground">
-                  {endpoint.providerAccountLabel ??
-                    endpoint.botLabel ??
-                    "Provider identity"}
-                </p>
-              </div>
-              <span className="text-xs text-muted-foreground">
-                {endpoint.status.replace(/_/g, " ")}
-              </span>
-              <div className="flex items-center gap-2">
-                {endpoint.status === "draft" ? (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => onNavigate(`/apps/chat/connect?provider=${endpoint.provider}&purpose=chat&resume=${endpoint.id}`)}
-                  >
-                    Finish setup
-                  </Button>
-                ) : null}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Manage ${endpoint.assignedAgentName} ${row.name} connection`}
-                    >
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onSelect={() => onNavigate(`/apps/chat/${endpoint.id}/settings`)}>
-                      Manage
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      variant="destructive"
-                      onSelect={() => onRequestRemove({
-                        kind: "chat",
-                        id: endpoint.id,
-                        accountName: `${endpoint.assignedAgentName} · ${row.name}`,
-                        providerName: row.name,
-                        remainingConnectionCount: 0,
-                      })}
-                    >
-                      <Trash2 />
-                      Remove connection
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
+          </button>
+          {accountsOpen ? (
+            <div className="divide-y divide-border border-t border-border">
+              {row.connections.map((connection) => (
+                <ConnectionAccountRow
+                  details={renderAccountDetails?.(connection)}
+                  key={connection.id}
+                  row={row}
+                  connection={connection}
+                  owner={connectionOwnerProfile(connection, userProfileById)}
+                  onNavigate={onNavigate}
+                  onRemove={() => {
+                    const accountName = connectionDisplayNameForOwner(
+                      connection,
+                      row.name,
+                      connectionOwnerProfile(connection, userProfileById),
+                    );
+                    onRequestRemove({
+                      id: connection.id,
+                      accountName,
+                      providerName: row.name,
+                      remainingConnectionCount: row.connections.filter(
+                        (candidate) =>
+                          candidate.id !== connection.id &&
+                          candidate.status === "active" &&
+                          candidate.enabled,
+                      ).length,
+                    });
+                  }}
+                />
+              ))}
+              {row.chatEndpoints.map((endpoint) => (
+                <ChatEndpointRow
+                  key={endpoint.id}
+                  row={row}
+                  endpoint={endpoint}
+                  onNavigate={onNavigate}
+                  onRequestRemove={onRequestRemove}
+                />
+              ))}
             </div>
-          ))}
+          ) : null}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Brand pill for a catalog connector. The fill is a runtime hex from the app
+ * catalog, so it is applied inline and the label color is computed against that
+ * same fill (alpha 1 composites to the brand color unchanged) rather than
+ * assuming one text color fits every brand.
+ */
+function ConnectorBrandBadge({
+  name,
+  accentColor,
+}: {
+  name: string;
+  accentColor: string;
+}) {
+  return (
+    <span
+      data-slot="connector-brand-badge"
+      className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
+      style={{
+        backgroundColor: accentColor,
+        color: pickTextColorForPillBg(accentColor, 1),
+      }}
+    >
+      {name}
+    </span>
+  );
+}
+
+function ChatEndpointRow({
+  row,
+  endpoint,
+  onNavigate,
+  onRequestRemove,
+}: {
+  row: ConnectorRowModel;
+  endpoint: ChatEndpoint;
+  onNavigate: (href: string) => void;
+  onRequestRemove: (target: ConnectionRemovalTarget) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <button
+          type="button"
+          className="truncate text-left text-sm font-medium hover:underline"
+          onClick={() => onNavigate(`/apps/chat/${endpoint.id}/settings`)}
+        >
+          {endpoint.assignedAgentName} ·{" "}
+          {endpoint.provider === "agentmail" ? "Email" : "Chat"}
+        </button>
+        <p className="truncate text-xs text-muted-foreground">
+          {endpoint.providerAccountLabel ?? endpoint.botLabel ?? "Provider identity"}
+        </p>
+      </div>
+      <span className="text-xs text-muted-foreground">
+        {endpoint.status.replace(/_/g, " ")}
+      </span>
+      <div className="flex items-center gap-2">
+        {endpoint.status === "draft" ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              onNavigate(
+                `/apps/chat/connect?provider=${endpoint.provider}&purpose=chat&resume=${endpoint.id}`,
+              )
+            }
+          >
+            Finish setup
+          </Button>
+        ) : null}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Manage ${endpoint.assignedAgentName} ${row.name} connection`}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem
+              onSelect={() => onNavigate(`/apps/chat/${endpoint.id}/settings`)}
+            >
+              Manage
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              variant="destructive"
+              onSelect={() =>
+                onRequestRemove({
+                  kind: "chat",
+                  id: endpoint.id,
+                  accountName: `${endpoint.assignedAgentName} · ${row.name}`,
+                  providerName: row.name,
+                  remainingConnectionCount: 0,
+                })
+              }
+            >
+              <Trash2 />
+              Remove connection
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
     </div>
   );
 }

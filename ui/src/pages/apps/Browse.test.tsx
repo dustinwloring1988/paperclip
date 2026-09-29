@@ -175,7 +175,7 @@ describe("Connectors landing page", () => {
     vi.clearAllMocks();
   });
 
-  async function renderBrowse() {
+  async function renderBrowse(revealAccounts = true) {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -188,7 +188,31 @@ describe("Connectors landing page", () => {
       );
     });
     await flushReact();
+    // These suites are about account-level detail (owner, status, menus), and
+    // cards now collapse that detail by default. The collapsed default itself
+    // is asserted separately in "collapses connected accounts behind a
+    // disclosure"; expand here so each test keeps asserting what it means to.
+    if (revealAccounts) await revealConnectedAccounts();
     return client;
+  }
+
+  /**
+   * Connector cards collapse their connected-account rows behind a disclosure
+   * so the grid stays uniform. Tests that assert account-level detail expand
+   * every disclosure first.
+   */
+  async function revealConnectedAccounts() {
+    const toggles = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        'button[aria-expanded="false"]',
+      ),
+    ).filter((button) => /connected account/i.test(button.textContent ?? ""));
+    for (const toggle of toggles) {
+      await act(() => {
+        toggle.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+    }
+    await flushReact();
   }
 
   it("shows retirement guidance before paused state for an obsolete Composio account", async () => {
@@ -264,9 +288,92 @@ describe("Connectors landing page", () => {
     expect(navigateMock).toHaveBeenLastCalledWith("/apps/connect?source=github");
   });
 
-  it("renders one connector list with the requested header and no gallery sections", async () => {
+  it("lays the connector catalog out as a multi-column grid", async () => {
+    await renderBrowse();
+    const list = container.querySelector('[aria-label="Connector list"]');
+    expect(list?.className).toContain("grid");
+    expect(list?.className).toContain(
+      "[grid-template-columns:repeat(auto-fill,minmax(19rem,1fr))]",
+    );
+  });
+
+  it("renders every catalog app in the one connector list, with no developer-choices shelf", async () => {
+    listGalleryMock.mockResolvedValue({
+      apps: [
+        galleryEntry({
+          key: "notion",
+          name: "Notion",
+          branding: { logoUrl: "/brands/apps/notion.svg", accentColor: "#000000" },
+        }),
+        galleryEntry({
+          key: "stripe",
+          name: "Stripe",
+          branding: { logoUrl: "/brands/apps/stripe.svg", accentColor: "#635BFF" },
+        }),
+        galleryEntry({ key: "jira", name: "Jira" }),
+      ],
+    });
     await renderBrowse();
 
+    // The curated shelf is gone; curated apps are ordinary rows in the one list.
+    expect(container.querySelector('[aria-label="Developer choices"]')).toBeNull();
+    const catalog = container.querySelector('[aria-label="Connector list"]');
+    expect(
+      Array.from(
+        catalog?.querySelectorAll<HTMLElement>("[data-app-slug]") ?? [],
+      ).map((row) => row.dataset.appSlug),
+    ).toEqual(expect.arrayContaining(["notion", "stripe", "jira"]));
+  });
+
+  it("paints a connector brand badge with the catalog brand color and contrast text", async () => {
+    listGalleryMock.mockResolvedValue({
+      apps: [
+        galleryEntry({
+          key: "notion",
+          name: "Notion",
+          branding: { logoUrl: "/brands/apps/notion.svg", accentColor: "#000000" },
+        }),
+      ],
+    });
+    await renderBrowse();
+    const list = container.querySelector('[aria-label="Connector list"]');
+    const badge = list?.querySelector(
+      '[data-slot="connector-brand-badge"]',
+    ) as HTMLElement | null;
+    expect(badge?.textContent).toBe("Notion");
+    // The fill is the catalog's brand hex, supplied at runtime rather than as a
+    // literal, so the token gates stay clean.
+    expect(badge?.style.backgroundColor).toBe("rgb(0, 0, 0)");
+    // Near-black fill must resolve to the light label, not dark.
+    expect(badge?.style.color).toBe("rgb(248, 250, 252)");
+  });
+
+  it("collapses connected accounts behind a disclosure instead of inlining them", async () => {
+    listApplicationsMock.mockResolvedValue({ applications: [application()] });
+    listConnectionsMock.mockResolvedValue({ connections: [connection()] });
+    await renderBrowse(false);
+
+    const row = container.querySelector<HTMLElement>('[data-app-slug="notion"]');
+    expect(row?.dataset.connected).toBe("true");
+    // Account-level detail is not inlined on the card by default.
+    expect(row?.textContent).not.toContain("Connected by");
+    expect(row?.textContent).toContain("1 account connected");
+    // ...but the disclosure that reveals it is present and collapsed.
+    const toggle = Array.from(
+      row?.querySelectorAll<HTMLButtonElement>("button[aria-expanded]") ?? [],
+    ).find((button) => /connected account/i.test(button.textContent ?? ""));
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+
+    // Expanding reveals the account row the rest of the suite asserts on.
+    await act(() => {
+      toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+    expect(row?.textContent).toContain("Connected by");
+  });
+
+  it("renders one connector list with the requested header and no gallery sections", async () => {
+    await renderBrowse();
     expect(setBreadcrumbsMock).toHaveBeenCalledWith([{ label: "Connectors" }]);
     expect(setBreadcrumbsMock).not.toHaveBeenCalledWith(
       expect.arrayContaining([expect.objectContaining({ href: "/dashboard" })]),

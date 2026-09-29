@@ -7,8 +7,10 @@
     "developer"
   ],
   "featured": false,
+  "developerChoice": true,
   "branding": {
-    "logoUrl": "/brands/apps/cloudflare.svg"
+    "logoUrl": "/brands/apps/cloudflare.svg",
+    "accentColor": "#F38020"
   },
   "urlPatterns": [
     "https://mcp.cloudflare.com/*"

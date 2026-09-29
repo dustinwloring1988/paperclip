@@ -7,8 +7,10 @@
     "content"
   ],
   "featured": true,
+  "developerChoice": true,
   "branding": {
-    "logoUrl": "/brands/apps/notion.svg"
+    "logoUrl": "/brands/apps/notion.svg",
+    "accentColor": "#000000"
   },
   "urlPatterns": [
     "https://mcp.notion.com/*"

@@ -108,6 +108,18 @@ describe("composer assignee picker", () => {
     expect(choices.some((item) => item.includes("GPT-6 Sol"))).toBe(false);
   });
 
+  it("keeps the assignee name readable in the trigger and exposes the full value on hover", () => {
+    render(vi.fn(), vi.fn());
+    const trigger = document.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-assignee"]');
+    expect(trigger).not.toBeNull();
+    expect(trigger!.getAttribute("title")).toBe("Clippy · gpt-6-sol · High");
+    const label = [...trigger!.querySelectorAll<HTMLSpanElement>("span")]
+      .find((item) => item.textContent === "Clippy");
+    expect(label).toBeDefined();
+    expect(label!.className).toContain("shrink-0");
+    expect(label!.className).toContain("truncate");
+  });
+
   it("preserves settings when the selected assignee is chosen again", async () => {
     const onAssigneeChange = vi.fn();
     const onSettingsChange = vi.fn();

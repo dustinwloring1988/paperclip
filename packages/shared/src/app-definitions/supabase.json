@@ -7,8 +7,10 @@
     "data"
   ],
   "featured": false,
+  "developerChoice": true,
   "branding": {
-    "logoUrl": "/brands/apps/supabase.svg"
+    "logoUrl": "/brands/apps/supabase.svg",
+    "accentColor": "#3ECF8E"
   },
   "urlPatterns": [
     "https://mcp.supabase.com/*"
