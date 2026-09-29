@@ -7,8 +7,10 @@
     "commerce"
   ],
   "featured": false,
+  "developerChoice": true,
   "branding": {
-    "logoUrl": "/brands/apps/stripe.svg"
+    "logoUrl": "/brands/apps/stripe.svg",
+    "accentColor": "#635BFF"
   },
   "urlPatterns": [
     "https://mcp.stripe.com/*"

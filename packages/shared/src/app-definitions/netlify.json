@@ -7,9 +7,11 @@
     "developer"
   ],
   "featured": false,
+  "developerChoice": true,
   "branding": {
     "logoUrl": "/brands/apps/netlify.svg",
-    "darkLogoUrl": "/brands/apps/netlify-dark.svg"
+    "darkLogoUrl": "/brands/apps/netlify-dark.svg",
+    "accentColor": "#00C7B7"
   },
   "urlPatterns": [
     "https://netlify-mcp.netlify.app/*"

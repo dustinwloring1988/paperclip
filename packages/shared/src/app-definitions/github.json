@@ -7,9 +7,11 @@
     "developer"
   ],
   "featured": true,
+  "developerChoice": true,
   "branding": {
     "logoUrl": "/brands/apps/github.svg",
-    "darkLogoUrl": "/brands/apps/github-dark.svg"
+    "darkLogoUrl": "/brands/apps/github-dark.svg",
+    "accentColor": "#24292F"
   },
   "urlPatterns": [
     "https://api.githubcopilot.com/mcp/*",
