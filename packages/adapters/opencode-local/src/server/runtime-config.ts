@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { asBoolean } from "@paperclipai/adapter-utils/server-utils";
 
 type PreparedOpenCodeRuntimeConfig = {
@@ -92,6 +93,46 @@ function parseConfiguredModelRef(raw: unknown): { provider: string; model: strin
   return { provider: trimmed.slice(0, slash), model: trimmed.slice(slash + 1) };
 }
 
+// Mount Paperclip-assigned connection gateways (Notion, GitHub, ...) as OpenCode
+// remote MCP servers. OpenCode addresses them by key under the top-level `mcp`
+// block, so the gateway's own name has to be unique against the servers the host's
+// own config already declares — a collision would silently repoint a server the
+// operator configured by hand. Renaming the managed entry is the safe direction:
+// the gateway is Paperclip's own, and the user's server keeps its name and URL.
+function buildManagedMcpServers(
+  existingMcp: Record<string, unknown>,
+  servers: AdapterRuntimeMcpServer[],
+  notes: string[],
+): Record<string, unknown> {
+  const usedNames = new Set(Object.keys(existingMcp));
+  const managed: Record<string, unknown> = {};
+  for (const server of servers) {
+    const base = server.name || "paperclip-mcp";
+    let name = base;
+    let suffix = 2;
+    while (usedNames.has(name)) {
+      name = `${base}-${server.connectionId.slice(0, 8)}`;
+      if (usedNames.has(name)) {
+        name = `${base}-${server.connectionId.slice(0, 8)}-${suffix}`;
+        suffix += 1;
+      }
+    }
+    usedNames.add(name);
+    managed[name] = {
+      type: "remote",
+      url: server.url,
+      enabled: true,
+      headers: { Authorization: `Bearer ${server.token}` },
+    };
+  }
+  if (Object.keys(managed).length > 0) {
+    notes.push(
+      `Mounted ${Object.keys(managed).length} Paperclip-managed MCP server(s) into the runtime OpenCode config: ${Object.keys(managed).join(", ")}.`,
+    );
+  }
+  return { ...existingMcp, ...managed };
+}
+
 async function readJsonObject(filepath: string): Promise<Record<string, unknown>> {
   try {
     const raw = await fs.readFile(filepath, "utf8");
@@ -105,16 +146,11 @@ async function readJsonObject(filepath: string): Promise<Record<string, unknown>
 export async function prepareOpenCodeRuntimeConfig(input: {
   env: Record<string, string>;
   config: Record<string, unknown>;
+  mcpServers?: AdapterRuntimeMcpServer[];
   targetIsRemote?: boolean;
 }): Promise<PreparedOpenCodeRuntimeConfig> {
   const skipPermissions = asBoolean(input.config.dangerouslySkipPermissions, true);
-  if (!skipPermissions) {
-    return {
-      env: input.env,
-      notes: [],
-      cleanup: async () => {},
-    };
-  }
+  const mcpServers = input.mcpServers ?? [];
 
   // For remote execution targets the host XDG_CONFIG_HOME path is meaningless
   // (and actively harmful — it leaks a macOS-only path into the remote Linux
@@ -122,6 +158,21 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   // box do that via prepareAdapterExecutionTargetRuntime in execute.ts; this
   // host-fs helper is local-only.
   if (input.targetIsRemote) {
+    return {
+      env: input.env,
+      notes: [],
+      cleanup: async () => {},
+    };
+  }
+
+  // Skipping the auto-approve rewrite is the operator opting out of
+  // `permission: "allow"` — it is not a request to also drop the connections
+  // Paperclip assigned to this run. Those are separate concerns, so a run with
+  // managed MCP servers still gets a generated config home even when the
+  // permissions opt-out is set; dropping them would leave a `ready` connection
+  // silently unmounted, which is exactly the registry-green/runtime-empty
+  // failure this mount exists to close.
+  if (!skipPermissions && mcpServers.length === 0) {
     return {
       env: input.env,
       notes: [],
@@ -149,9 +200,9 @@ export async function prepareOpenCodeRuntimeConfig(input: {
   }
 
   const existingConfig = await readJsonObject(runtimeConfigPath);
-  const notes = [
-    "Injected runtime OpenCode config with permission=allow for all tools and connections.",
-  ];
+  const notes: string[] = skipPermissions
+    ? ["Injected runtime OpenCode config with permission=allow for all tools and connections."]
+    : [];
 
   // Merge gateway/custom provider definitions supplied via PAPERCLIP_OPENCODE_PROVIDERS
   // (a JSON object in OpenCode's `provider` shape). OpenCode resolves a `--model
@@ -202,12 +253,20 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     }
   }
 
-  const nextConfig: Record<string, unknown> = {
-    ...existingConfig,
-    permission: "allow",
-  };
+  const nextConfig: Record<string, unknown> = { ...existingConfig };
+  if (skipPermissions) {
+    nextConfig.permission = "allow";
+  }
   if (Object.keys(nextProvider).length > 0) {
     nextConfig.provider = nextProvider;
+  }
+
+  // Mount the connections Paperclip assigned to this run. OpenCode's own config
+  // already declares servers under `mcp`, so merge rather than replace: an
+  // operator's hand-written server must survive the run.
+  if (mcpServers.length > 0) {
+    const existingMcp = isPlainObject(existingConfig.mcp) ? existingConfig.mcp : {};
+    nextConfig.mcp = buildManagedMcpServers(existingMcp, mcpServers, notes);
   }
 
   // Pin OpenCode's auxiliary "small" model (used for session-title generation and
@@ -221,7 +280,12 @@ export async function prepareOpenCodeRuntimeConfig(input: {
     nextConfig.small_model = smallModel;
     notes.push(`Pinned OpenCode small_model to ${smallModel}.`);
   }
-  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, "utf8");
+  // 0600: the generated config carries per-run gateway bearer tokens, so it must
+  // not be world-readable inside a shared host or container filesystem.
+  await fs.writeFile(runtimeConfigPath, `${JSON.stringify(nextConfig, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
 
   return {
     env: {

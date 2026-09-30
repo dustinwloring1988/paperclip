@@ -303,6 +303,157 @@ describe("ensureRemoteOpenCodeModelConfiguredAndAvailable", () => {
   });
 });
 
+describe("OpenCode local managed MCP mounting", () => {
+  let configHome: string;
+
+  beforeEach(async () => {
+    configHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-mcp-test-"));
+    vi.stubEnv("XDG_CONFIG_HOME", configHome);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(configHome, { recursive: true, force: true });
+  });
+
+  async function fakeOpencode(name: string) {
+    const commandPath = path.join(configHome, name);
+    await fs.writeFile(commandPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    return commandPath;
+  }
+
+  it("writes assigned connections into the generated opencode.json the run actually uses", async () => {
+    const commandPath = await fakeOpencode("fake-opencode-mcp");
+    let generatedConfig: Record<string, unknown> | null = null;
+    runProcessMock.mockReset();
+    runProcessMock.mockImplementation((async (_runId: string, _target: unknown, _command: string, _args: string[], options: { env?: Record<string, string> }) => {
+      const runConfigHome = options.env?.XDG_CONFIG_HOME;
+      if (runConfigHome) {
+        generatedConfig = JSON.parse(
+          await fs.readFile(path.join(runConfigHome, "opencode", "opencode.json"), "utf8"),
+        ) as Record<string, unknown>;
+      }
+      return probeResult({
+        stdout: JSON.stringify({ type: "text", sessionID: "mcp-session", part: { text: "done" } }),
+      });
+    }) as never);
+
+    const result = await execute({
+      runId: "run-mcp-mount",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      runtimeMcp: {
+        getServers: () => [{
+          name: "paperclip-assigned",
+          url: "http://localhost:3100/mcp/gateways/gw_test",
+          token: "pcgw_test-token",
+          connectionId: "assignment:abc123",
+        }],
+      },
+      onLog: async () => {},
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(generatedConfig).not.toBeNull();
+    expect((generatedConfig as unknown as { mcp: Record<string, { url: string; headers: Record<string, string> }> }).mcp
+      ["paperclip-assigned"]).toMatchObject({
+        type: "remote",
+        url: "http://localhost:3100/mcp/gateways/gw_test",
+        headers: { Authorization: "Bearer pcgw_test-token" },
+      });
+    // The identity is persisted so the next run can detect a changed assignment.
+    expect((result.sessionParams as { mcpServerIdentity?: string }).mcpServerIdentity).toBe(
+      JSON.stringify([
+        { name: "paperclip-assigned", url: "http://localhost:3100/mcp/gateways/gw_test", connectionId: "assignment:abc123" },
+      ]),
+    );
+  });
+
+  it("does not resume a session started with a different connection set", async () => {
+    const commandPath = await fakeOpencode("fake-opencode-mcp-resume");
+    const seenArgs: string[][] = [];
+    runProcessMock.mockReset();
+    runProcessMock.mockImplementation((async (_runId: string, _target: unknown, _command: string, args: string[]) => {
+      seenArgs.push(args);
+      return probeResult({
+        stdout: JSON.stringify({ type: "text", sessionID: "fresh-session", part: { text: "done" } }),
+      });
+    }) as never);
+
+    await execute({
+      runId: "run-mcp-resume",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: {
+        sessionId: "stale-session",
+        sessionParams: {
+          sessionId: "stale-session",
+          cwd: configHome,
+          mcpServerIdentity: JSON.stringify([
+            { name: "paperclip-assigned", url: "http://localhost:3100/mcp/gateways/gw_old", connectionId: "assignment:old" },
+          ]),
+        },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      runtimeMcp: {
+        getServers: () => [{
+          name: "paperclip-assigned",
+          url: "http://localhost:3100/mcp/gateways/gw_new",
+          token: "pcgw_test-token",
+          connectionId: "assignment:new",
+        }],
+      },
+      onLog: async () => {},
+    });
+
+    expect(seenArgs[0]).not.toContain("--session");
+  });
+
+  it("resumes when the connection set is unchanged", async () => {
+    const commandPath = await fakeOpencode("fake-opencode-mcp-resume-ok");
+    const identity = JSON.stringify([
+      { name: "paperclip-assigned", url: "http://localhost:3100/mcp/gateways/gw_same", connectionId: "assignment:same" },
+    ]);
+    const seenArgs: string[][] = [];
+    runProcessMock.mockReset();
+    runProcessMock.mockImplementation((async (_runId: string, _target: unknown, _command: string, args: string[]) => {
+      seenArgs.push(args);
+      return probeResult({
+        stdout: JSON.stringify({ type: "text", sessionID: "kept-session", part: { text: "done" } }),
+      });
+    }) as never);
+
+    await execute({
+      runId: "run-mcp-resume-ok",
+      agent: { id: "agent-1", companyId: "company-1", name: "OpenCode", adapterType: "opencode_local", adapterConfig: {} },
+      runtime: {
+        sessionId: "kept-session",
+        sessionParams: { sessionId: "kept-session", cwd: configHome, mcpServerIdentity: identity },
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: { command: commandPath, cwd: configHome, model: "openai/gpt-5", env: { OPENCODE_ALLOW_ALL_MODELS: "1" } },
+      context: {},
+      runtimeMcp: {
+        getServers: () => [{
+          name: "paperclip-assigned",
+          url: "http://localhost:3100/mcp/gateways/gw_same",
+          token: "pcgw_test-token",
+          connectionId: "assignment:same",
+        }],
+      },
+      onLog: async () => {},
+    });
+
+    expect(seenArgs[0]).toContain("--session");
+    expect(seenArgs[0][seenArgs[0].indexOf("--session") + 1]).toBe("kept-session");
+  });
+});
+
 describe("ensureRemoteOpenCodeModelConfiguredAndAvailable — probe is non-fatal when it cannot run", () => {
   const target = { kind: "remote", transport: "ssh" } as never;
   const base = {

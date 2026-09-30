@@ -816,6 +816,11 @@ const openclawGatewayAdapter: ServerAdapterModule = {
 
 const openCodeLocalAdapter: ServerAdapterModule = {
   type: "opencode_local",
+  // Governs the run-scoped connections_search/connection_request helper, which
+  // opencode's agent process reads from the environment. Assigned connection
+  // gateways (ctx.runtimeMcp) are a separate concern and are mounted natively
+  // into the generated opencode.json by the adapter — see opencode-local's
+  // prepareOpenCodeRuntimeConfig.
   runtimeToolDelivery: "environment",
   execute: openCodeExecute,
   testEnvironment: openCodeTestEnvironment,

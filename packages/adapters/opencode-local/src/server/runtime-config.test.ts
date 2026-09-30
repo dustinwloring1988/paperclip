@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AdapterRuntimeMcpServer } from "@paperclipai/adapter-utils";
 import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 
 const cleanupPaths = new Set<string>();
@@ -314,6 +315,118 @@ describe("prepareOpenCodeRuntimeConfig", () => {
     const prepared = await prepareOpenCodeRuntimeConfig({
       env: { XDG_CONFIG_HOME: configHome },
       config: { dangerouslySkipPermissions: false },
+    });
+
+    expect(prepared.env).toEqual({ XDG_CONFIG_HOME: configHome });
+    expect(prepared.notes).toEqual([]);
+    await prepared.cleanup();
+  });
+});
+
+describe("prepareOpenCodeRuntimeConfig managed MCP mounting", () => {
+  const notionServer: AdapterRuntimeMcpServer = {
+    name: "paperclip-assigned",
+    url: "https://paperclip.example.com/mcp/gateways/gw_abc123",
+    token: "pcgw_run-scoped-token",
+    connectionId: "assignment:deadbeef",
+  };
+
+  async function readRuntimeConfig(prepared: { env: Record<string, string> }) {
+    return JSON.parse(
+      await fs.readFile(
+        path.join(prepared.env.XDG_CONFIG_HOME, "opencode", "opencode.json"),
+        "utf8",
+      ),
+    ) as {
+      permission?: unknown;
+      mcp?: Record<string, { type?: string; url?: string; enabled?: boolean; headers?: Record<string, string> }>;
+    };
+  }
+
+  it("mounts assigned connections as remote MCP servers with a bearer token", async () => {
+    const configHome = await makeConfigHome({ permission: { read: "allow" } });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: {},
+      mcpServers: [notionServer],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeConfig = await readRuntimeConfig(prepared);
+    expect(runtimeConfig.mcp?.["paperclip-assigned"]).toEqual({
+      type: "remote",
+      url: notionServer.url,
+      enabled: true,
+      headers: { Authorization: `Bearer ${notionServer.token}` },
+    });
+    expect(prepared.notes.some((note) => note.includes("Paperclip-managed MCP server(s)"))).toBe(true);
+    await prepared.cleanup();
+  });
+
+  it("mounts connections even when the permissions opt-out is set", async () => {
+    const configHome = await makeConfigHome();
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: { dangerouslySkipPermissions: false },
+      mcpServers: [notionServer],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    expect(prepared.env.XDG_CONFIG_HOME).not.toBe(configHome);
+    const runtimeConfig = await readRuntimeConfig(prepared);
+    expect(runtimeConfig.mcp?.["paperclip-assigned"]?.url).toBe(notionServer.url);
+    // The opt-out is about auto-approving tools, not about connection delivery.
+    expect(runtimeConfig.permission).toBeUndefined();
+    await prepared.cleanup();
+  });
+
+  it("preserves host-configured MCP servers and renames a colliding managed one", async () => {
+    const configHome = await makeConfigHome({
+      mcp: {
+        notion: { type: "remote", url: "https://operator.example.com/mcp" },
+      },
+    });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: {},
+      mcpServers: [notionServer],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeConfig = await readRuntimeConfig(prepared);
+    // The operator's own server keeps its name and URL.
+    expect(runtimeConfig.mcp?.notion?.url).toBe("https://operator.example.com/mcp");
+    // The managed one is renamed rather than silently repointing it.
+    expect(runtimeConfig.mcp?.notion?.headers).toBeUndefined();
+    const managedKey = Object.keys(runtimeConfig.mcp ?? {}).find(
+      (key) => key !== "notion",
+    );
+    expect(managedKey).toBeDefined();
+    expect(runtimeConfig.mcp?.[managedKey as string]?.url).toBe(notionServer.url);
+    await prepared.cleanup();
+  });
+
+  it("writes no mcp block when no connections are assigned", async () => {
+    const configHome = await makeConfigHome({ permission: { read: "allow" } });
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: {},
+      mcpServers: [],
+    });
+    cleanupPaths.add(prepared.env.XDG_CONFIG_HOME);
+
+    const runtimeConfig = await readRuntimeConfig(prepared);
+    expect(runtimeConfig.mcp).toBeUndefined();
+    await prepared.cleanup();
+  });
+
+  it("does not mount connections for a remote execution target", async () => {
+    const configHome = await makeConfigHome();
+    const prepared = await prepareOpenCodeRuntimeConfig({
+      env: { XDG_CONFIG_HOME: configHome },
+      config: {},
+      mcpServers: [notionServer],
+      targetIsRemote: true,
     });
 
     expect(prepared.env).toEqual({ XDG_CONFIG_HOME: configHome });
