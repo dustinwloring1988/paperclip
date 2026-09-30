@@ -1318,7 +1318,57 @@ describe("IssuesList", () => {
     act(() => {
       root.unmount();
     });
-  }, 10_000);
+  });
+
+  it("opens on the board when the surface sets defaultViewMode and nothing is stored", async () => {
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        defaultViewMode="board"
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+
+    await waitForAssertion(() => {
+      expect(mockKanbanBoard).toHaveBeenCalled();
+    });
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("keeps a stored view mode over defaultViewMode", async () => {
+    localStorage.setItem(
+      "paperclip:test-issues:company-1",
+      JSON.stringify({ viewMode: "list" }),
+    );
+
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[createIssue({ id: "issue-stored-list", title: "Stored list issue" })]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        defaultViewMode="board"
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Stored list issue");
+    });
+    expect(mockKanbanBoard).not.toHaveBeenCalled();
+
+    act(() => {
+      root.unmount();
+    });
+  });
 
   it("loads board issues with a separate result limit for each status column", async () => {
     localStorage.setItem(

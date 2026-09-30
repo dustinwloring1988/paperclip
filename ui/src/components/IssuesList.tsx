@@ -234,13 +234,17 @@ function getInitialViewState(
   stored: { viewState: IssueViewState; source: "current" | "legacy" | "default" },
   initialAssignees?: string[],
   defaultSortField?: IssueSortField,
+  defaultViewMode?: IssueViewState["viewMode"],
 ): IssueViewState {
   const base = stored.source === "default" && defaultSortField
     ? { ...stored.viewState, sortField: defaultSortField, sortDir: "asc" as const }
     : stored.viewState;
-  if (!initialAssignees) return base;
+  const withViewMode = stored.source === "default" && defaultViewMode
+    ? { ...base, viewMode: defaultViewMode }
+    : base;
+  if (!initialAssignees) return withViewMode;
   return {
-    ...base,
+    ...withViewMode,
     assignees: initialAssignees,
     statuses: [],
   };
@@ -251,8 +255,9 @@ function getInitialWorkspaceViewState(
   initialAssignees?: string[],
   initialWorkspaces?: string[],
   defaultSortField?: IssueSortField,
-): IssueViewState {
-  const initial = getInitialViewState(stored, initialAssignees, defaultSortField);
+  defaultViewMode?: IssueViewState["viewMode"],
+) {
+  const initial = getInitialViewState(stored, initialAssignees, defaultSortField, defaultViewMode);
   if (!initialWorkspaces) return initial;
   return {
     ...initial,
@@ -478,6 +483,12 @@ interface IssuesListProps {
   baseCreateIssueDefaults?: Record<string, unknown>;
   createIssueLabel?: string;
   defaultSortField?: IssueSortField;
+  /**
+   * View mode to open on when this surface has no stored preference yet.
+   * Applies only to the no-preference case, so a view mode the operator
+   * chose (and that was persisted) always wins over it.
+   */
+  defaultViewMode?: IssueViewState["viewMode"];
   showProgressSummary?: boolean;
   /**
    * When set together with `showProgressSummary`, the progress strip fetches
@@ -717,6 +728,7 @@ function StreamlinedIssuesList({
   baseCreateIssueDefaults,
   createIssueLabel,
   defaultSortField,
+  defaultViewMode,
   showProgressSummary = false,
   parentIssueIdForCostSummary,
   enableRoutineVisibilityFilter = false,
@@ -797,7 +809,7 @@ function StreamlinedIssuesList({
   const initialPreferences = initialPreferencesRef.current;
 
   const [viewState, setViewState] = useState<IssueViewState>(() =>
-    getInitialWorkspaceViewState(initialPreferences, initialAssignees, initialWorkspaces, defaultSortField),
+    getInitialWorkspaceViewState(initialPreferences, initialAssignees, initialWorkspaces, defaultSortField, defaultViewMode),
   );
   const [assigneePickerIssueId, setAssigneePickerIssueId] = useState<string | null>(null);
   const [assigneeSearch, setAssigneeSearch] = useState("");
@@ -820,7 +832,7 @@ function StreamlinedIssuesList({
     if (prevViewStateContextKey.current !== nextContextKey) {
       prevViewStateContextKey.current = nextContextKey;
       const preferences = loadIssueCollectionPreferences(preferenceLocation);
-      setViewState(getInitialWorkspaceViewState(preferences, initialAssignees, initialWorkspaces, defaultSortField));
+      setViewState(getInitialWorkspaceViewState(preferences, initialAssignees, initialWorkspaces, defaultSortField, defaultViewMode));
       setVisibleIssueColumns(preferences.columns);
     }
   }, [
@@ -830,6 +842,7 @@ function StreamlinedIssuesList({
     initialWorkspaces,
     initialWorkspacesKey,
     defaultSortField,
+    defaultViewMode,
     preferenceLocation.companyId,
     preferenceLocation.collectionKey,
     preferenceLocation.legacyViewStorageKey,
