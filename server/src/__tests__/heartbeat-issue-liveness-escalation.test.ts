@@ -6,6 +6,7 @@ import {
   agents,
   agentWakeupRequests,
   agentRuntimeState,
+  approvals,
   budgetPolicies,
   companies,
   companyMemberships,
@@ -15,6 +16,7 @@ import {
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueApprovals,
   issueComments,
   issueRelations,
   issueRecoveryActions,
@@ -115,6 +117,12 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     await db.delete(issueTreeHolds);
     await db.delete(issueRelations);
     await db.delete(issueRecoveryActions);
+    // issueApprovals and approvals both hold a company foreign key, so they have
+    // to go before companies. The stale-blocker-hold tests seed a linked
+    // approval, and skipping these makes the companies delete fail and cascade
+    // into every later test's cleanup.
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
@@ -508,6 +516,89 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.blockers_resolved_wake_emitted")));
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ entityId: blockedIssueId });
+  });
+
+  // A resolved blocker emits a wake but never changed the dependent's status, so
+  // an issue whose *only* reason to be blocked was that blocker stayed `blocked`
+  // with nothing left to resolve: work that looks parked with no nameable
+  // reason. The backstop now releases the hold as well as waking.
+  it("releases a stale blocker hold so a resolved dependency is not left blocked", async () => {
+    const { companyId, blockedIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+
+    const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(result.staleHoldReleased).toBe(1);
+    expect(result.healed).toBe(1);
+
+    const [released] = await db
+      .select({ status: issues.status, blockedTransitionAt: issues.blockedTransitionAt })
+      .from(issues)
+      .where(eq(issues.id, blockedIssueId));
+    expect(released?.status).toBe("todo");
+    // The blocked-cycle bookkeeping is cleared with the hold, so the next real
+    // block starts a fresh wake cycle rather than reusing a spent key.
+    expect(released?.blockedTransitionAt).toBeNull();
+
+    const events = await db
+      .select({ action: activityLog.action, entityId: activityLog.entityId })
+      .from(activityLog)
+      .where(
+        and(
+          eq(activityLog.companyId, companyId),
+          eq(activityLog.action, "issue.stale_blocker_hold_released"),
+        ),
+      );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ entityId: blockedIssueId });
+  });
+
+  it("keeps a resolved dependency blocked while an unblock descriptor still owns the wait", async () => {
+    const { blockedIssueId } = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    await db
+      .update(issues)
+      .set({
+        unblockDescriptor: {
+          owner: { type: "board" },
+          action: "A human decides the pricing question.",
+        },
+        updatedAt: new Date(),
+      })
+      .where(eq(issues.id, blockedIssueId));
+
+    const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(result.staleHoldReleased).toBe(0);
+    const [held] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, blockedIssueId));
+    expect(held?.status).toBe("blocked");
+  });
+
+  it("keeps a resolved dependency blocked while a linked approval is still pending", async () => {
+    const { companyId, blockedIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Approve the paid Netlify plan" },
+    });
+    await db
+      .insert(issueApprovals)
+      .values({ companyId, issueId: blockedIssueId, approvalId, linkedByUserId: null });
+
+    const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(result.staleHoldReleased).toBe(0);
+    const [held] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, blockedIssueId));
+    expect(held?.status).toBe("blocked");
   });
 
   it("reconciles a resolved blocked dependency after the assignee-null window closes", async () => {

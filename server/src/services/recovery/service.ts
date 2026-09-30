@@ -1148,6 +1148,64 @@ export function recoveryService(
   }
 
   /**
+   * A linked approval is an independent reason to stay `blocked`: it survives its
+   * blockers resolving, so a stale-hold clear must not consume it. Mirrors the
+   * approval statuses the write-time `blocked` disposition guard accepts.
+   */
+  async function hasPendingLinkedApproval(companyId: string, issueId: string) {
+    return db
+      .select({ id: approvals.id })
+      .from(issueApprovals)
+      .innerJoin(approvals, eq(approvals.id, issueApprovals.approvalId))
+      .where(
+        and(
+          eq(issueApprovals.companyId, companyId),
+          eq(issueApprovals.issueId, issueId),
+          eq(approvals.companyId, companyId),
+          inArray(approvals.status, ["pending", "revision_requested"]),
+        ),
+      )
+      .limit(1)
+      .then((rows) => Boolean(rows[0]));
+  }
+
+  /**
+   * A stale blocker hold: the issue is `blocked`, every first-class blocker is
+   * `done`, and nothing else justifies the hold -- no unblock descriptor, no
+   * linked approval. The wake alone does not fix this. `issue_blockers_resolved`
+   * fires, the assignee is woken, and the issue stays `blocked`, so the work
+   * looks parked with no reason anyone can name. This is the same shape the
+   * blocker-diagnostics route already reports as a "stale blocker hold".
+   *
+   * Clearing it is the exact inverse of the write-time `blocked` guard, which
+   * refuses to *enter* `blocked` without one of {unresolved blocker, pending
+   * interaction, pending approval, unblock descriptor}. If the only reason was
+   * the blockers and they are gone, the hold has no remaining justification and
+   * the issue must leave `blocked`.
+   */
+  async function isStaleBlockerHold(
+    companyId: string,
+    issueId: string,
+  ): Promise<boolean> {
+    const [descriptor, approval] = await Promise.all([
+      db
+        .select({ id: issues.id })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.id, issueId),
+            eq(issues.companyId, companyId),
+            sql`${issues.unblockDescriptor} is not null`,
+          ),
+        )
+        .limit(1)
+        .then((rows) => Boolean(rows[0])),
+      hasPendingLinkedApproval(companyId, issueId),
+    ]);
+    return !descriptor && !approval;
+  }
+
+  /**
    * Pausing an agent does not turn an already committed passive response into
    * stranded work. This only preserves the exact current wait; it grants no
    * execution or presentation authority and does not repair historical state.
@@ -5539,11 +5597,12 @@ export function recoveryService(
       interactionSkipped: 0,
       pauseHoldSkipped: 0,
       notReadySkipped: 0,
-      candidateLimitSkipped: 0,
-      deferredOrFailed: 0,
-      enqueueFailed: 0,
-      issueIds: [] as string[],
-    };
+    candidateLimitSkipped: 0,
+    deferredOrFailed: 0,
+    enqueueFailed: 0,
+    staleHoldReleased: 0,
+    issueIds: [] as string[],
+  };
 
     const source = opts?.source ?? "issue_graph_liveness.backstop";
     const requestedByActorId =
@@ -5754,6 +5813,16 @@ export function recoveryService(
             // enqueueWakeup returns null for normal deferred/skipped paths
             // such as disabled wake-on-demand or concurrency gating. That is
             // not an enqueue error, but the backstop still did not heal now.
+            //
+            // A null is also the platform's own verdict that this issue is not
+            // free to act on right now: an execution hold, a durable wait, or a
+            // live run all coalesce here instead of producing a wake. That is
+            // precisely the set of reasons an issue may legitimately stay
+            // `blocked`, so the stale-hold release below is gated on having
+            // received a real wake rather than re-deriving that set here. A
+            // second, hand-rolled list of the reasons to stay blocked drifts
+            // from the platform's, and eventually releases a hold that something
+            // real is holding.
             result.deferredOrFailed += 1;
             continue;
           }
@@ -5778,6 +5847,60 @@ export function recoveryService(
               blockerIssueIds: readiness.blockerIssueIds,
             },
           });
+
+          // An assignee is being woken onto this issue, so the hold must not
+          // still be standing when they arrive: a wake that leaves the issue
+          // `blocked` with every blocker done is the parked work this whole path
+          // exists to prevent. Gated on the wake actually landing, so an issue
+          // something real is still holding is never released.
+          //
+          // Ordered after the wake deliberately. Releasing first makes
+          // enqueueWakeup return null for the issue it just released, which
+          // silently disables the wake it was meant to accompany. Failing to
+          // release is not fatal either: the next tick retries, and the woken
+          // agent can still see the hold and report it.
+          if (await isStaleBlockerHold(companyId, candidate.id)) {
+            try {
+              const released = await issuesSvc.update(candidate.id, {
+                status: "todo",
+                actorAgentId: null,
+                actorUserId: null,
+              });
+              if (released) {
+                result.staleHoldReleased += 1;
+                await logActivity(db, {
+                  companyId,
+                  actorType: "system",
+                  actorId: "issue_graph_liveness_backstop",
+                  agentId,
+                  runId: opts?.runId ?? null,
+                  action: "issue.stale_blocker_hold_released",
+                  entityType: "issue",
+                  entityId: candidate.id,
+                  details: {
+                    source,
+                    previousStatus: "blocked",
+                    nextStatus: "todo",
+                    wakeupRunId: wake.id,
+                    blockerIssueIds: readiness.blockerIssueIds,
+                    reason: "all_blockers_done_and_no_other_waiting_path",
+                  },
+                });
+              }
+            } catch (err) {
+              logger.warn(
+                {
+                  err,
+                  issueId: candidate.id,
+                  companyId,
+                  agentId,
+                  blockerIssueIds: readiness.blockerIssueIds,
+                  source,
+                },
+                "failed to release stale blocker hold after dependency wake",
+              );
+            }
+          }
         } catch (err) {
           result.deferredOrFailed += 1;
           result.enqueueFailed += 1;
