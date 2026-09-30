@@ -188,8 +188,8 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     description:
       "Enable the experimental shared status-card board, update engine, and gated API.",
     tier: "managed",
-    cloudDefault: false,
-    selfHostedDefault: false,
+    cloudDefault: true,
+    selfHostedDefault: true,
   },
   enableExternalObjects: {
     title: "External Objects",
@@ -227,16 +227,24 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     description:
       "Show Summarizer-generated status slots on project and workspace pages, with on-demand refresh and revision history.",
     tier: "managed",
-    cloudDefault: false,
-    selfHostedDefault: false,
+    cloudDefault: true,
+    selfHostedDefault: true,
   },
   enableDecisions: {
     title: "Decisions",
     description:
       "Show the Decisions item in the main sidebar — the attention home that surfaces tasks awaiting input.",
     tier: "preference",
-    cloudDefault: false,
-    selfHostedDefault: false,
+    cloudDefault: true,
+    selfHostedDefault: true,
+  },
+  enableV2Dashboard: {
+    title: "V2 Dashboard",
+    description:
+      "Add the at-a-glance widget row — Decisions, Status, and Routines — above the dashboard charts. Turning it off restores the classic dashboard exactly as it was.",
+    tier: "preference",
+    cloudDefault: true,
+    selfHostedDefault: true,
   },
   enableGoalsSidebarLink: {
     title: "Goals Sidebar Link",
@@ -250,8 +258,8 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     description:
       "Instruct agents to write user interactions (confirmations, questions, suggested tasks) in ASD-STE100 Simplified Technical English with brief decision context.",
     tier: "preference",
-    cloudDefault: false,
-    selfHostedDefault: false,
+    cloudDefault: true,
+    selfHostedDefault: true,
   },
   enableServerInfoDebugView: {
     title: "Server Info Debug View",

@@ -327,7 +327,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (authToken) {
     env.PAPERCLIP_API_KEY = authToken;
   }
-  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({ env, config });
+  // Connections Paperclip assigned to this run (an installed company tool such as
+  // Notion). These arrive as scoped gateway URLs + short-lived bearer tokens and
+  // are mounted into the generated OpenCode config by prepareOpenCodeRuntimeConfig.
+  const runtimeMcpServers = ctx.runtimeMcp?.getServers() ?? [];
+  // Identity deliberately excludes the token: it is minted per run, so including
+  // it would make every heartbeat look like a changed assignment and throw away
+  // the session. Name + url + connectionId is what actually decides which tools
+  // the resumed session would have had.
+  const runtimeMcpIdentity = JSON.stringify(
+    runtimeMcpServers.map(({ name, url, connectionId }) => ({ name, url, connectionId })),
+  );
+  const preparedRuntimeConfig = await prepareOpenCodeRuntimeConfig({
+    env,
+    config,
+    mcpServers: runtimeMcpServers,
+  });
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {
@@ -504,12 +519,26 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const runtimeSessionId = asString(runtimeSessionParams.sessionId, runtime.sessionId ?? "");
     const runtimeSessionCwd = asString(runtimeSessionParams.cwd, "");
     const runtimeRemoteExecution = parseObject(runtimeSessionParams.remoteExecution);
+    const runtimeMcpServerIdentity = asString(runtimeSessionParams.mcpServerIdentity, "");
+    // A session started without the current connections must not be resumed into:
+    // OpenCode binds its tool set when the session is created, so resuming would
+    // keep serving the stale set even though this run's assignment differs.
+    const hasMatchingMcpServers =
+      runtimeMcpServerIdentity.length === 0
+        ? runtimeMcpServers.length === 0
+        : runtimeMcpServerIdentity === runtimeMcpIdentity;
     const canResumeSession =
       runtimeSessionId.length > 0 &&
+      hasMatchingMcpServers &&
       (runtimeSessionCwd.length === 0 || path.resolve(runtimeSessionCwd) === path.resolve(effectiveExecutionCwd)) &&
       adapterExecutionTargetSessionMatches(runtimeRemoteExecution, runtimeExecutionTarget);
     const sessionId = canResumeSession ? runtimeSessionId : null;
-    if (executionTargetIsRemote && runtimeSessionId && !canResumeSession) {
+    if (runtimeSessionId && !canResumeSession && !hasMatchingMcpServers) {
+      await onLog(
+        "stdout",
+        `[paperclip] OpenCode session "${runtimeSessionId}" was started with a different Paperclip connection set and will not be resumed.\n`,
+      );
+    } else if (executionTargetIsRemote && runtimeSessionId && !canResumeSession) {
       await onLog(
         "stdout",
         `[paperclip] OpenCode session "${runtimeSessionId}" does not match the current remote execution identity and will not be resumed in "${effectiveExecutionCwd}". Starting a fresh remote session.\n`,
@@ -688,6 +717,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? ({
             sessionId: resolvedSessionId,
             cwd: effectiveExecutionCwd,
+            mcpServerIdentity: runtimeMcpIdentity,
             ...(workspaceId ? { workspaceId } : {}),
             ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
             ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),

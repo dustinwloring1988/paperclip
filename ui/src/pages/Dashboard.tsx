@@ -9,6 +9,7 @@ import { claimOnboardingOffer } from "../lib/onboarding-auto-open";
 import { Link } from "@/lib/router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dashboardApi } from "../api/dashboard";
+import { instanceSettingsApi } from "../api/instanceSettings";
 import { activityApi } from "../api/activity";
 import { accessApi } from "../api/access";
 import { issuesApi } from "../api/issues";
@@ -38,8 +39,21 @@ import { InlineBanner } from "../components/InlineBanner";
 import type { Agent, Issue } from "@paperclipai/shared";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { SmokeLabDashboardCard } from "../components/SmokeLabDashboardCard";
+import { DashboardAtAGlance } from "../components/DashboardAtAGlance";
+import { useV2DashboardEnabled } from "../hooks/useV2DashboardEnabled";
 
 const DASHBOARD_ACTIVITY_LIMIT = 10;
+
+export type DashboardPresentation = "v2" | "classic";
+
+/**
+ * V2 is the same dashboard plus the at-a-glance widget row. Classic is the
+ * layout exactly as it was, so turning the flag off is a real revert rather
+ * than a degraded variant.
+ */
+export function resolveDashboardPresentation(enabled: boolean): DashboardPresentation {
+  return enabled ? "v2" : "classic";
+}
 
 function getRecentIssues(issues: Issue[]): Issue[] {
   return [...issues]
@@ -79,6 +93,18 @@ export function Dashboard() {
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
   const hydratedActivityRef = useRef(false);
   const activityAnimationTimersRef = useRef<number[]>([]);
+
+  // Read above the loading early-return so the settings query is not torn down
+  // and re-mounted across the loading transition. It fails open, so a
+  // not-yet-resolved settings payload never drops the widget row for a beat.
+  const { enabled: v2DashboardEnabled } = useV2DashboardEnabled();
+  // Same cache key as the flag hook above, so this is served from the cache
+  // rather than costing a second request. It gates the two widgets whose own
+  // surfaces can independently be switched off.
+  const { data: experimentalSettings } = useQuery({
+    queryKey: queryKeys.instance.experimentalSettings,
+    queryFn: () => instanceSettingsApi.getExperimental(),
+  });
 
   // `isFetching` is read alongside the data: a cached list is served while its
   // refetch runs, and an empty one from before the first hire must not pass
@@ -452,6 +478,14 @@ export function Dashboard() {
           </div>
 
           <SmokeLabDashboardCard companyId={selectedCompanyId!} />
+
+          {resolveDashboardPresentation(v2DashboardEnabled) === "v2" ? (
+            <DashboardAtAGlance
+              companyId={selectedCompanyId!}
+              decisionsEnabled={experimentalSettings?.enableDecisions === true}
+              statusCardsEnabled={experimentalSettings?.enableStatusCards === true}
+            />
+          ) : null}
 
           <div className={cn("grid grid-cols-2 gap-4", SHOW_TASK_PRIORITY_UI ? "lg:grid-cols-4" : "lg:grid-cols-3")}>
             <ChartCard title="Run Activity" subtitle="Last 14 days">

@@ -90,6 +90,12 @@ export interface InstanceExperimentalSettings {
   enableSummaries: boolean;
   enableStatusCards: boolean;
   enableDecisions: boolean;
+  /**
+   * V2 dashboard. The same dashboard as the classic one plus an at-a-glance
+   * widget row (Decisions, Status, Routines) above the charts. Off falls back
+   * to the classic layout exactly as it was.
+   */
+  enableV2Dashboard: boolean;
   enableGoalsSidebarLink: boolean;
   enableServerInfoDebugView: boolean;
   /** Shows internal Paperclip maintainer tools and observability links. */

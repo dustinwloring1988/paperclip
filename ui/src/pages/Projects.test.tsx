@@ -241,4 +241,15 @@ describe("Projects", () => {
     expect(hiddenDescriptionLine).not.toBeNull();
     expect(hiddenDescriptionLine?.className).toContain("min-h-4");
   });
+
+  it("lays projects out as a multi-column card grid", async () => {
+    await renderProjects();
+
+    const list = container.querySelector('[aria-label="My Projects list"]');
+    expect(list?.className).toContain("grid");
+    expect(list?.className).toContain(
+      "[grid-template-columns:repeat(auto-fill,minmax(19rem,1fr))]",
+    );
+    expect(list?.querySelectorAll('[role="listitem"]').length).toBeGreaterThan(0);
+  });
 });
