@@ -58,6 +58,7 @@ describe("instance settings service", () => {
       enableSummaries: true,
       enableStatusCards: true,
       enableDecisions: true,
+      enableV2Dashboard: true,
       enableGoalsSidebarLink: true,
       enableServerInfoDebugView: true,
       enablePaperclipDeveloperMode: true,

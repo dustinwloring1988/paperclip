@@ -1,6 +1,6 @@
 import type { Agent } from "@paperclipai/shared";
 import { describe, expect, it } from "vitest";
-import { derivePausedAgentBanner } from "./Dashboard";
+import { derivePausedAgentBanner, resolveDashboardPresentation } from "./Dashboard";
 
 function agent(overrides: Partial<Agent>): Agent {
   return {
@@ -41,5 +41,15 @@ describe("derivePausedAgentBanner", () => {
       agent({ id: "b", status: "idle" }),
     ]);
     expect(banner).toBeNull();
+  });
+});
+
+describe("resolveDashboardPresentation", () => {
+  it("uses the at-a-glance layout when the V2 flag is on", () => {
+    expect(resolveDashboardPresentation(true)).toBe("v2");
+  });
+
+  it("falls back to the classic layout when the V2 flag is off", () => {
+    expect(resolveDashboardPresentation(false)).toBe("classic");
   });
 });

@@ -69,6 +69,12 @@ export const instanceExperimentalSettingsSchema = z.object({
   enableSummaries: z.boolean().default(true),
   enableStatusCards: z.boolean().default(true),
   enableDecisions: z.boolean().default(true),
+  /**
+   * V2 dashboard. The same dashboard as the classic one plus an at-a-glance
+   * widget row (Decisions, Status, Routines) above the charts. Off falls back
+   * to the classic layout exactly as it was.
+   */
+  enableV2Dashboard: z.boolean().default(true),
   enableGoalsSidebarLink: z.boolean().default(false),
   enableServerInfoDebugView: z.boolean().default(false),
   enablePaperclipDeveloperMode: z.boolean().default(false),

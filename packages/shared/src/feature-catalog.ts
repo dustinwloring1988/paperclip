@@ -238,6 +238,14 @@ export const INSTANCE_FEATURE_CATALOG: Record<InstanceFeatureKey, FeatureCatalog
     cloudDefault: true,
     selfHostedDefault: true,
   },
+  enableV2Dashboard: {
+    title: "V2 Dashboard",
+    description:
+      "Add the at-a-glance widget row — Decisions, Status, and Routines — above the dashboard charts. Turning it off restores the classic dashboard exactly as it was.",
+    tier: "preference",
+    cloudDefault: true,
+    selfHostedDefault: true,
+  },
   enableGoalsSidebarLink: {
     title: "Goals Sidebar Link",
     description: "Restore the Goals item in the main sidebar while the goals surface is being evaluated.",

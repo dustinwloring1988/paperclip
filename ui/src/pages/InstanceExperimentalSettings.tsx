@@ -227,6 +227,7 @@ export function InstanceExperimentalSettings() {
   const statusCardsBlockedByManagedSummaries = summariesManaged && !enableSummaries;
   const summariesRequiredByManagedStatusCards = statusCardsManaged && enableStatusCards;
   const enableDecisions = experimentalQuery.data?.enableDecisions === true;
+  const enableV2Dashboard = experimentalQuery.data?.enableV2Dashboard !== false;
   const enableGoalsSidebarLink = experimentalQuery.data?.enableGoalsSidebarLink === true;
   const enableCases = experimentalQuery.data?.enableCases === true;
   const enableServerInfoDebugView = experimentalQuery.data?.enableServerInfoDebugView === true;
@@ -676,6 +677,17 @@ export function InstanceExperimentalSettings() {
             settingKey="enableIssuePlanDecompositions"
             managed={managedKeys.enableIssuePlanDecompositions}
             ariaLabel="Toggle task plan decomposition panel experimental setting"
+          />
+
+          <ExperimentalToggleCard
+            title="V2 Dashboard"
+            description="Add the at-a-glance widget row — Decisions, Status, and Routines — above the dashboard charts. The rest of the dashboard is unchanged, and turning this off restores the classic dashboard exactly as it was."
+            checked={enableV2Dashboard}
+            onCheckedChange={(checked) => toggleMutation.mutate({ enableV2Dashboard: checked })}
+            disabled={toggleMutation.isPending}
+            settingKey="enableV2Dashboard"
+            managed={managedKeys.enableV2Dashboard}
+            ariaLabel="Toggle V2 dashboard experimental setting"
           />
         </section>
       ) : null}
