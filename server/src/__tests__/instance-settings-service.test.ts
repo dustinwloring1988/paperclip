@@ -55,13 +55,13 @@ describe("instance settings service", () => {
       enableExperimentalFileViewer: true,
       enableBuiltInAgents: true,
       enableBetaSkills: false,
-      enableSummaries: false,
-      enableStatusCards: false,
-      enableDecisions: false,
+      enableSummaries: true,
+      enableStatusCards: true,
+      enableDecisions: true,
       enableGoalsSidebarLink: true,
       enableServerInfoDebugView: true,
       enablePaperclipDeveloperMode: true,
-      enableSimplifiedEnglishInteractions: false,
+      enableSimplifiedEnglishInteractions: true,
       enableFirstTaskPlanProposal: false,
       autoRestartDevServerWhenIdle: true,
       enableWorkspaceBranchReconcileForward: true,
@@ -121,17 +121,17 @@ describe("instance settings service", () => {
     ).toBe(true);
   });
 
-  it("defaults enableSimplifiedEnglishInteractions to false for empty and legacy stored settings", () => {
-    expect(normalizeExperimentalSettings(undefined).enableSimplifiedEnglishInteractions).toBe(false);
-    expect(normalizeExperimentalSettings({}).enableSimplifiedEnglishInteractions).toBe(false);
+  it("defaults enableSimplifiedEnglishInteractions to true for empty and legacy stored settings", () => {
+    expect(normalizeExperimentalSettings(undefined).enableSimplifiedEnglishInteractions).toBe(true);
+    expect(normalizeExperimentalSettings({}).enableSimplifiedEnglishInteractions).toBe(true);
     expect(
       normalizeExperimentalSettings({ enableStreamlinedLeftNavigation: true })
         .enableSimplifiedEnglishInteractions,
-    ).toBe(false);
-    expect(
-      normalizeExperimentalSettings({ enableSimplifiedEnglishInteractions: true })
-        .enableSimplifiedEnglishInteractions,
     ).toBe(true);
+    expect(
+      normalizeExperimentalSettings({ enableSimplifiedEnglishInteractions: false })
+        .enableSimplifiedEnglishInteractions,
+    ).toBe(false);
   });
 
   it("defaults enableSmokeLab to false for empty and legacy stored settings", () => {
@@ -167,12 +167,13 @@ describe("instance settings service", () => {
     ).toBe(false);
   });
 
-  it("defaults enableDecisions to false for empty and legacy stored settings", () => {
-    expect(normalizeExperimentalSettings(undefined).enableDecisions).toBe(false);
-    expect(normalizeExperimentalSettings({}).enableDecisions).toBe(false);
+  it("defaults enableDecisions to true for empty and legacy stored settings", () => {
+    expect(normalizeExperimentalSettings(undefined).enableDecisions).toBe(true);
+    expect(normalizeExperimentalSettings({}).enableDecisions).toBe(true);
     expect(
       normalizeExperimentalSettings({ enableStreamlinedLeftNavigation: true }).enableDecisions,
-    ).toBe(false);
+    ).toBe(true);
+    expect(normalizeExperimentalSettings({ enableDecisions: false }).enableDecisions).toBe(false);
   });
 
   it("defaults workspace branch repair settings to true for empty and legacy stored settings", () => {
