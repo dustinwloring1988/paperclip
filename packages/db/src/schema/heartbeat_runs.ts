@@ -39,6 +39,17 @@ export const heartbeatRuns = pgTable(
     wakeupRequestId: uuid("wakeup_request_id").references(() => agentWakeupRequests.id),
     exitCode: integer("exit_code"),
     signal: text("signal"),
+    // Pre-flight spend estimate for this run, so estimate-vs-actual stays auditable
+    // after the fact. Actual spend is deliberately NOT stored here: it is derived
+    // from cost_events at read time. Dual-writing a spend column is how the two
+    // drift.
+    //
+    // NOT YET WRITTEN. The measurement layer that produces the estimate ships in
+    // the next phase; until a writer lands, every row here is null. Read it as
+    // null, never as zero. The column is added now while the table change is
+    // additive and unpopulated, so the estimate writer does not need a second
+    // migration on a table this hot.
+    estimatedCostCents: integer("estimated_cost_cents"),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
     resultJson: jsonb("result_json").$type<Record<string, unknown>>(),
     runtimeMode: text("runtime_mode").notNull().default("legacy"),

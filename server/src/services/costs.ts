@@ -1,8 +1,17 @@
-import { agentAvatarUrl, resolveAgentAppearance } from "@paperclipai/shared";
-import { and, desc, eq, gte, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
+import { agentAvatarUrl, ISSUE_STATUSES, resolveAgentAppearance } from "@paperclipai/shared";
+import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, companies, costEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import {
+  activityLog,
+  agents,
+  companies,
+  costEvents,
+  goals,
+  heartbeatRuns,
+  issues,
+  projects,
+} from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { budgetService, type BudgetServiceHooks } from "./budgets.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
@@ -15,8 +24,75 @@ export interface CostDateRange {
 const METERED_BILLING_TYPE = "metered_api";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
 
+/**
+ * An issue counts as completed when its current status is `done`.
+ *
+ * The full issue status set is `backlog | todo | in_progress | in_review |
+ * done | blocked | cancelled` (ISSUE_STATUSES in packages/shared). `cancelled`
+ * is terminal but is NOT completion, so `done` is the only completed status.
+ * The `satisfies` clause makes this a compile error if that status set ever
+ * stops containing `done`, rather than a silently empty metric.
+ */
+const COMPLETED_ISSUE_STATUSES = ["done"] as const satisfies readonly (typeof ISSUE_STATUSES)[number][];
+
 function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
+}
+
+/**
+ * Postgres returns int8/numeric as strings over the wire, so every raw
+ * aggregate row has to be coerced here. Anything non-finite collapses to null
+ * instead of leaking NaN into a JSON response.
+ */
+function asNumberOrNull(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function costRangeConditions(companyId: string, range?: CostDateRange) {
+  const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
+  if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+  if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+  return conditions;
+}
+
+/**
+ * Resolves a run to the issue it last touched, so a cost row carrying no
+ * issue_id/project_id/goal_id can still be attributed.
+ *
+ * Same source as `byProject`: activity_log rows with entityType 'issue',
+ * joined to that issue. DISTINCT ON is deliberately narrowed to run_id alone
+ * (ordered by newest activity first) so the CTE yields at most one row per
+ * run. That is what makes it safe to left join against cost_events without
+ * fanning out and double counting a run's spend.
+ */
+function runIssueLinkCte(db: Db, companyId: string) {
+  const issueIdAsText = sql<string>`${issues.id}::text`;
+  return db
+    .selectDistinctOn([activityLog.runId], {
+      runId: activityLog.runId,
+      issueId: issues.id,
+      projectId: issues.projectId,
+      goalId: issues.goalId,
+    })
+    .from(activityLog)
+    .innerJoin(
+      issues,
+      and(
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, issueIdAsText),
+      ),
+    )
+    .where(
+      and(
+        eq(activityLog.companyId, companyId),
+        eq(issues.companyId, companyId),
+        isNotNull(activityLog.runId),
+      ),
+    )
+    .orderBy(activityLog.runId, desc(activityLog.createdAt))
+    .as("run_issue_links");
 }
 
 function currentUtcMonthWindow(now = new Date()) {
@@ -518,6 +594,286 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .where(and(...conditions, sql`${effectiveProjectId} is not null`))
         .groupBy(effectiveProjectId, projects.name)
         .orderBy(desc(costCentsExpr));
+    },
+
+    /**
+     * One row per heartbeat_runs.id that incurred cost in the range.
+     *
+     * A run is the spend unit, so the cost_events fan-out (many rows per run)
+     * is collapsed with sum() here. cost_events_company_heartbeat_run_idx
+     * covers the grouping key, so this needs no new index.
+     */
+    byRun: async (companyId: string, range?: CostDateRange, limit: number = 100) => {
+      const runIssueLinks = runIssueLinkCte(db, companyId);
+      const conditions = costRangeConditions(companyId, range);
+      const effectiveIssueId = sql<string | null>`coalesce(${costEvents.issueId}, ${runIssueLinks.issueId})`;
+      const effectiveProjectId = sql<string | null>`coalesce(${costEvents.projectId}, ${runIssueLinks.projectId})`;
+      const costCentsExpr = sumAsNumber(costEvents.costCents);
+
+      // A run can touch several issues, so its cost rows can carry different
+      // issue/project ids. Grouping on them would split one run into several
+      // rows and break the one-row-per-run contract, so take a deterministic
+      // min() of each instead. min() ignores nulls, so a run whose rows are all
+      // unattributed reports null rather than a bogus id.
+      //
+      // Bounded because this is the only per-row cost rollup: every sibling
+      // collapses to agent/project/provider cardinality, so none of them needs a
+      // limit. A company can hold far more runs than rows any client should page
+      // through, so the route passes `parseCostLimit` (default 100, max 500). The
+      // distribution endpoint, which is what a cap would actually be set from, is
+      // an aggregate and is unaffected.
+      //
+      // A truncated page is a partial view, not a total: summing `costCents` across
+      // one page gives that page's spend, not the company's. `startedAt` breaks ties
+      // so that page is at least deterministic — two runs with identical spend would
+      // otherwise come back in an arbitrary order and re-order between two identical
+      // requests.
+      return db
+        .select({
+          // Non-null by construction: heartbeat_run_id is filtered below.
+          runId: sql<string>`${costEvents.heartbeatRunId}`,
+          // The run's own agent, not the cost row's. A run has exactly one
+          // agent, so this can never split the grouping key.
+          agentId: heartbeatRuns.agentId,
+          issueId: sql<string | null>`min(${effectiveIssueId}::text)::uuid`,
+          projectId: sql<string | null>`min(${effectiveProjectId}::text)::uuid`,
+          costCents: costCentsExpr,
+          inputTokens: sumAsNumber(costEvents.inputTokens),
+          cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+          outputTokens: sumAsNumber(costEvents.outputTokens),
+          costEventCount: sql<number>`count(*)::int`,
+          startedAt: heartbeatRuns.startedAt,
+          finishedAt: heartbeatRuns.finishedAt,
+          status: heartbeatRuns.status,
+        })
+        .from(costEvents)
+        .innerJoin(
+          heartbeatRuns,
+          and(
+            eq(heartbeatRuns.id, costEvents.heartbeatRunId),
+            eq(heartbeatRuns.companyId, companyId),
+          ),
+        )
+        .leftJoin(runIssueLinks, eq(costEvents.heartbeatRunId, runIssueLinks.runId))
+        .where(and(...conditions, isNotNull(costEvents.heartbeatRunId)))
+        .groupBy(
+          costEvents.heartbeatRunId,
+          heartbeatRuns.agentId,
+          heartbeatRuns.startedAt,
+          heartbeatRuns.finishedAt,
+          heartbeatRuns.status,
+        )
+        .orderBy(desc(costCentsExpr), desc(heartbeatRuns.startedAt))
+        .limit(limit);
+    },
+
+    /**
+     * The measurement layer for a per-run spend cap: where the cost of a single
+     * run actually sits across observed runs.
+     *
+     * Granularity is the whole point. Percentiles are taken over PER-RUN
+     * TOTALS, never over raw cost_events rows. A run emits many cost events (one
+     * per model call), so percentiles over raw rows would measure the size of a
+     * single billing event and read far lower than what a run costs. The CTE
+     * sums cost_events by heartbeat_run_id FIRST; the ordered-set aggregates
+     * then run over those per-run totals.
+     *
+     * percentile_cont interpolates between neighbours, which is the curve a
+     * board member expects from a p95; results are rounded to the nearest cent
+     * because cost_cents is an integer. Runs with zero cost still count toward
+     * runCount and can drag an interpolated percentile down slightly, which is
+     * honest: a free run really did happen.
+     *
+     * The aggregates never divide, so an empty company yields runCount 0 and
+     * null percentiles rather than NaN.
+     */
+    runSpendDistribution: async (companyId: string, range?: CostDateRange) => {
+      const conditions = costRangeConditions(companyId, range);
+
+      // Sum cost_events to one row per run BEFORE any percentile is taken.
+      // Tables stay unaliased so the drizzle-rendered column references above
+      // remain valid inside this raw fragment.
+      const perRunCost = sql`
+        WITH per_run_cost AS (
+          SELECT
+            cost_events.heartbeat_run_id AS run_id,
+            heartbeat_runs.agent_id AS agent_id,
+            sum(cost_events.cost_cents)::bigint AS run_cost_cents
+          FROM cost_events
+          JOIN heartbeat_runs
+            ON heartbeat_runs.id = cost_events.heartbeat_run_id
+            AND heartbeat_runs.company_id = cost_events.company_id
+          WHERE ${and(...conditions)}
+            AND cost_events.heartbeat_run_id IS NOT NULL
+          GROUP BY cost_events.heartbeat_run_id, heartbeat_runs.agent_id
+        )
+      `;
+
+      const overallQuery = sql`
+        ${perRunCost}
+        SELECT
+          count(*)::int AS "runCount",
+          coalesce(sum(run_cost_cents), 0)::double precision AS "totalCents",
+          round(percentile_cont(0.50) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p50Cents",
+          round(percentile_cont(0.90) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p90Cents",
+          round(percentile_cont(0.95) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p95Cents",
+          round(percentile_cont(0.99) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p99Cents",
+          max(run_cost_cents) AS "maxCents"
+        FROM per_run_cost
+      `;
+
+      const byAgentQuery = sql`
+        ${perRunCost}
+        SELECT
+          agent_id AS "agentId",
+          count(*)::int AS "runCount",
+          round(percentile_cont(0.95) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p95Cents"
+        FROM per_run_cost
+        GROUP BY agent_id
+        ORDER BY "runCount" DESC, "p95Cents" DESC NULLS LAST
+      `;
+
+      const [overallResult, byAgentResult] = await Promise.all([
+        db.execute(overallQuery),
+        db.execute(byAgentQuery),
+      ]);
+
+      const overallRow = (
+        Array.isArray(overallResult) ? overallResult[0] : undefined
+      ) as
+        | {
+            runCount?: number | string | null;
+            totalCents?: number | string | null;
+            p50Cents?: number | string | null;
+            p90Cents?: number | string | null;
+            p95Cents?: number | string | null;
+            p99Cents?: number | string | null;
+            maxCents?: number | string | null;
+          }
+        | undefined;
+
+      const byAgentRows = (Array.isArray(byAgentResult) ? byAgentResult : []) as {
+        agentId?: string | null;
+        runCount?: number | string | null;
+        p95Cents?: number | string | null;
+      }[];
+
+      return {
+        companyId,
+        runCount: Number(overallRow?.runCount ?? 0),
+        totalCents: Number(overallRow?.totalCents ?? 0),
+        p50Cents: asNumberOrNull(overallRow?.p50Cents),
+        p90Cents: asNumberOrNull(overallRow?.p90Cents),
+        p95Cents: asNumberOrNull(overallRow?.p95Cents),
+        p99Cents: asNumberOrNull(overallRow?.p99Cents),
+        // Null, not 0: "no runs" and "every run was free" are different answers.
+        maxCents: asNumberOrNull(overallRow?.maxCents),
+        byAgent: byAgentRows.map((row) => ({
+          agentId: row.agentId ?? null,
+          runCount: Number(row.runCount ?? 0),
+          p95Cents: asNumberOrNull(row.p95Cents),
+        })),
+      };
+    },
+
+    /**
+     * Cost effectiveness: what the company got for its spend.
+     *
+     * "Completed issue" means an issue whose CURRENT status is `done` (see
+     * COMPLETED_ISSUE_STATUSES above). Two consequences of using current status
+     * rather than a transition history:
+     *
+     * - We count DISTINCT ISSUES, not `done` transitions. An issue that reached
+     *   done three times is one completed issue.
+     * - Status can change after spend is recorded, and this metric follows the
+     *   status. An issue reopened after completion drops out of BOTH the
+     *   numerator and the denominator, so the ratio stays internally consistent
+     *   rather than charging cost against work that no longer counts as done.
+     *
+     * The denominator is issues with spend inside the requested range, not every
+     * `done` issue the company has ever had, so the numerator and denominator
+     * describe the same population.
+     */
+    costPerOutcome: async (companyId: string, range?: CostDateRange) => {
+      const runIssueLinks = runIssueLinkCte(db, companyId);
+      const conditions = costRangeConditions(companyId, range);
+      const effectiveProjectId = sql<string | null>`coalesce(${costEvents.projectId}, ${runIssueLinks.projectId})`;
+      const effectiveGoalId = sql<string | null>`coalesce(${costEvents.goalId}, ${runIssueLinks.goalId})`;
+
+      const [completedRows, perProjectRows, perGoalRows] = await Promise.all([
+        // Joins on `cost_events.issue_id` directly, with no run-link fallback, so
+        // the headline ratio only counts spend that was stamped with an issue at
+        // write time. Run-linked spend still reaches perProject/perGoal below,
+        // which do apply the fallback. Under partial stamping this makes
+        // `perCompletedIssueCents` read HIGHER than true cost-per-outcome,
+        // because unattributed spend is absent from the numerator while its issues
+        // are still in the denominator. That is a deliberate, conservative choice:
+        // the number shown is the cost of the spend we can actually attribute, not
+        // a total-cost-per-issue figure. Report it as attributed cost.
+        db
+          .select({
+            completedIssueCount: sql<number>`count(distinct ${issues.id})::int`,
+            completedCostCents: sumAsNumber(costEvents.costCents),
+          })
+          .from(issues)
+          .innerJoin(
+            costEvents,
+            and(eq(costEvents.issueId, issues.id), eq(costEvents.companyId, companyId)),
+          )
+          .where(
+            and(
+              eq(issues.companyId, companyId),
+              visibleIssueCondition(),
+              inArray(issues.status, [...COMPLETED_ISSUE_STATUSES]),
+              ...conditions,
+            ),
+          ),
+        db
+          .select({
+            projectId: effectiveProjectId,
+            projectName: projects.name,
+            costCents: sumAsNumber(costEvents.costCents),
+            inputTokens: sumAsNumber(costEvents.inputTokens),
+            cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+            outputTokens: sumAsNumber(costEvents.outputTokens),
+          })
+          .from(costEvents)
+          .leftJoin(runIssueLinks, eq(costEvents.heartbeatRunId, runIssueLinks.runId))
+          .innerJoin(projects, sql`${projects.id} = ${effectiveProjectId}`)
+          .where(and(...conditions, sql`${effectiveProjectId} is not null`))
+          .groupBy(effectiveProjectId, projects.name)
+          .orderBy(desc(sql`sum(${costEvents.costCents})`)),
+        db
+          .select({
+            goalId: effectiveGoalId,
+            goalTitle: goals.title,
+            costCents: sumAsNumber(costEvents.costCents),
+            inputTokens: sumAsNumber(costEvents.inputTokens),
+            cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+            outputTokens: sumAsNumber(costEvents.outputTokens),
+          })
+          .from(costEvents)
+          .leftJoin(runIssueLinks, eq(costEvents.heartbeatRunId, runIssueLinks.runId))
+          .innerJoin(goals, sql`${goals.id} = ${effectiveGoalId}`)
+          .where(and(...conditions, sql`${effectiveGoalId} is not null`))
+          .groupBy(effectiveGoalId, goals.title)
+          .orderBy(desc(sql`sum(${costEvents.costCents})`)),
+      ]);
+
+      const completedIssueCount = Number(completedRows[0]?.completedIssueCount ?? 0);
+      const completedCostCents = Number(completedRows[0]?.completedCostCents ?? 0);
+
+      return {
+        companyId,
+        completedIssueCount,
+        completedCostCents,
+        // Null rather than Infinity/NaN when nothing completed in the range.
+        perCompletedIssueCents: completedIssueCount > 0
+          ? Math.round(completedCostCents / completedIssueCount)
+          : null,
+        perProject: perProjectRows,
+        perGoal: perGoalRows,
+      };
     },
   };
 }

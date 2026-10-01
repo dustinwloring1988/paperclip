@@ -707,8 +707,14 @@ export {
 export {
   createCostEventSchema,
   updateBudgetSchema,
+  costRunRollupSchema,
+  runSpendDistributionSchema,
+  costPerOutcomeSchema,
   type CreateCostEvent,
   type UpdateBudget,
+  type CostRunRollup,
+  type RunSpendDistribution,
+  type CostPerOutcome,
 } from "./cost.js";
 
 export {

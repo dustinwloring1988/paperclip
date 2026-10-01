@@ -45,6 +45,39 @@ GET /api/companies/{companyId}/costs/by-project
 
 Returns per-project cost breakdown for the current month.
 
+## Costs by Run
+
+```
+GET /api/companies/{companyId}/costs/by-run
+```
+
+One row per heartbeat run that incurred cost, highest-spend first. Accepts the
+shared `from`/`to` range plus `limit` (default 100, max 500).
+
+A truncated page is a partial view, not a total: summing `costCents` across one
+page gives that page's spend, not the company's. Use
+`/costs/run-spend-distribution` for whole-range aggregates.
+
+## Run Spend Distribution
+
+```
+GET /api/companies/{companyId}/costs/run-spend-distribution
+```
+
+Percentiles over **per-run totals**, not over individual cost events: a run emits
+one event per model call, so event-level percentiles would measure the size of a
+single billing call rather than what a run costs. This is the endpoint a per-run
+spend cap would be set from.
+
+## Cost per Outcome
+
+```
+GET /api/companies/{companyId}/costs/cost-per-outcome
+```
+
+Spend per completed issue, per project, and per goal. A ratio with no qualifying
+issues returns `null` rather than zero or `Infinity`.
+
 ## Budget Management
 
 ### Set Company Budget

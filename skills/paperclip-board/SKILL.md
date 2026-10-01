@@ -612,6 +612,9 @@ All web UI links must include the company prefix:
 | Cost summary | GET | `/api/companies/:companyId/costs/summary` |
 | Costs by agent | GET | `/api/companies/:companyId/costs/by-agent` |
 | Costs by project | GET | `/api/companies/:companyId/costs/by-project` |
+| Costs by run | GET | `/api/companies/:companyId/costs/by-run` |
+| Run spend distribution | GET | `/api/companies/:companyId/costs/run-spend-distribution` |
+| Cost per outcome | GET | `/api/companies/:companyId/costs/cost-per-outcome` |
 | Adapter docs | GET | `/llms/agent-configuration.txt` |
 | Adapter detail | GET | `/llms/agent-configuration/:adapterType.txt` |
 | Agent icons | GET | `/llms/agent-icons.txt` |

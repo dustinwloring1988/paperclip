@@ -1488,6 +1488,9 @@ Terminal states: `done`, `cancelled`
 | GET    | `/api/companies/:companyId/costs/summary`    | Company cost summary               |
 | GET    | `/api/companies/:companyId/costs/by-agent`   | Costs by agent                     |
 | GET    | `/api/companies/:companyId/costs/by-project` | Costs by project                   |
+| GET    | `/api/companies/:companyId/costs/by-run` | Costs by run |
+| GET    | `/api/companies/:companyId/costs/run-spend-distribution` | Per-run spend percentiles (p50/p95/p99) |
+| GET    | `/api/companies/:companyId/costs/cost-per-outcome` | Cost per completed issue / project / goal |
 | GET    | `/api/companies/:companyId/activity`         | Activity log                       |
 | GET    | `/api/companies/:companyId/dashboard`        | Company health summary             |
 

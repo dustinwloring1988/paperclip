@@ -327,6 +327,34 @@ export function costRoutes(
     res.json(rows);
   });
 
+  router.get("/companies/:companyId/costs/by-run", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseCostDateRange(req.query);
+    const limit = parseCostLimit(req.query);
+    const rows = await costs.byRun(companyId, range, limit);
+    res.json(rows);
+  });
+
+  router.get("/companies/:companyId/costs/run-spend-distribution", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseCostDateRange(req.query);
+    const distribution = await costs.runSpendDistribution(companyId, range);
+    res.json(distribution);
+  });
+
+  router.get("/companies/:companyId/costs/cost-per-outcome", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseCostDateRange(req.query);
+    const outcome = await costs.costPerOutcome(companyId, range);
+    res.json(outcome);
+  });
+
   router.patch("/companies/:companyId/budgets", validate(updateBudgetSchema), async (req, res) => {
     assertBoard(req);
     const companyId = req.params.companyId as string;

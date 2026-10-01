@@ -30,6 +30,9 @@ export function registerCostCommands(program: Command): void {
     ["by-provider", "costs/by-provider"],
     ["by-biller", "costs/by-biller"],
     ["by-project", "costs/by-project"],
+    ["by-run", "costs/by-run"],
+    ["run-spend-distribution", "costs/run-spend-distribution"],
+    ["cost-per-outcome", "costs/cost-per-outcome"],
     ["window-spend", "costs/window-spend"],
     ["quota-windows", "costs/quota-windows"],
   ] as const) {
