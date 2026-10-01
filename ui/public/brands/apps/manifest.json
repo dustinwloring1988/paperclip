@@ -515,6 +515,32 @@
       "provider": "Zep",
       "catalogVisible": true,
       "localAsset": "/brands/apps/zep.png"
+    },
+    {
+      "slug": "intercom",
+      "provider": "Intercom",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/intercom.svg",
+      "darkAsset": "/brands/apps/intercom-dark.svg"
+    },
+    {
+      "slug": "figma",
+      "provider": "Figma",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/figma.svg"
+    },
+    {
+      "slug": "exa",
+      "provider": "Exa",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/exa.svg",
+      "darkAsset": "/brands/apps/exa-dark.svg"
+    },
+    {
+      "slug": "apify",
+      "provider": "Apify",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/apify.svg"
     }
   ]
 }

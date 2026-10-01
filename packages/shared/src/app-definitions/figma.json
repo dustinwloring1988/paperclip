@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "slug": "figma",
+  "name": "Figma",
+  "description": "Read Figma files, comments, and design data.",
+  "categories": [
+    "content"
+  ],
+  "featured": false,
+  "branding": {
+    "logoUrl": "/brands/apps/figma.svg"
+  },
+  "urlPatterns": [
+    "https://mcp.figma.com/*"
+  ],
+  "docsUrl": "https://developers.figma.com/docs/figma-mcp-server/",
+  "setupPrerequisite": {
+    "title": "A seat that can actually use MCP",
+    "description": "Figma caps MCP by seat and plan, not by plan alone, and the numbers come from Figma's own rate-limits page (developers.figma.com/docs/figma-mcp-server/rate-limits-access/): a View or Collab seat gets up to 20 tool calls a month on Starter and up to 6 a month on Professional, Organization, and Enterprise, while a Dev or Full seat gets 200/day and 10/min on Starter, 200/day and 15/min on Professional, and 600/day and 20/min on Organization (the page leaves the Enterprise cell blank). Figma's two published sources disagree about Starter: this page says 20 a month, while Figma's mcp-server-guide README says 6 a month, and this copy follows the developer page. Limits apply to tools that read from Figma, so writes are exempt. A connection on the wrong seat connects cleanly, reports healthy, and then delivers almost nothing.",
+    "steps": [
+      "Check the seat type on the person signing in: Figma → Settings → Seat type.",
+      "Move to a Dev or Full seat before connecting if agents need more than a handful of calls.",
+      "Confirm the files and projects agents need are reachable by that person, not only by an admin."
+    ],
+    "actionLabel": "Open Figma MCP docs",
+    "actionUrl": "https://developers.figma.com/docs/figma-mcp-server/"
+  },
+  "redirectConstraints": "https-or-loopback-http",
+  "methods": [
+    {
+      "key": "mcp-oauth",
+      "transport": "mcp_remote",
+      "auth": "oauth",
+      "ownershipModes": [
+        "customer"
+      ],
+      "whenToUse": "Use browser sign-in for the provider-hosted MCP server.",
+      "defaults": {
+        "serverUrl": "https://mcp.figma.com/mcp",
+        "scopesHint": [
+          "mcp:connect"
+        ]
+      },
+      "guidanceMd": "Sign in with the Figma account whose files agents should read, using a client Figma has reviewed. The connection can only see what that person can already open in Figma.",
+      "riskTier": "S3",
+      "label": "Sign in with Figma",
+      "consoleLinks": {
+        "register": "https://developers.figma.com/docs/rest-api/oauth-apps/",
+        "settings": "https://www.figma.com/settings",
+        "docs": "https://developers.figma.com/docs/figma-mcp-server/"
+      },
+      "warnings": [
+        "A Figma-reviewed OAuth client, and a seat whose MCP access covers your team. Figma refuses RFC 7591 dynamic client registration for clients outside its MCP catalog, so sign in with a client Figma has reviewed. Reads are capped by seat and plan: on a View or Collab seat that is up to 20 tool calls a month on Starter and 6 a month on paid plans, per Figma's rate-limits page.",
+        "Figma refuses RFC 7591 dynamic client registration: POST https://api.figma.com/v1/oauth/mcp/register answers 403 for clients outside the Figma MCP catalog, so this connection signs in with a Figma-reviewed client ID and secret instead of registering one."
+      ],
+      "grantKinds": [
+        "user"
+      ],
+      "requiredResourceFilters": [
+        "team",
+        "project",
+        "file"
+      ]
+    }
+  ]
+}

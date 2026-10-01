@@ -111,6 +111,25 @@ type FixtureOptions = {
   registrationFailure?: { status: number; body: Record<string, unknown> };
   /** Extra provider-owned callbacks returned alongside the requested callback. */
   registrationExtraRedirectUris?: string[];
+  /**
+   * Override one `tools/call` answer. Return `null` to fall through to the
+   * default fixture response. Lets a test vary the provider's answer per bearer
+   * token, which is what proves *whose* credential reached the provider.
+   */
+  toolCall?: (input: {
+    token: string | null;
+    rpc: Record<string, unknown>;
+  }) => Response | null;
+  /**
+   * Observe the token the token endpoint just issued, together with the
+   * authorization code it redeemed. Tests that model per-user provider data use
+   * it to learn which credential a later `tools/call` will carry.
+   */
+  onTokenIssued?: (input: {
+    accessToken: string;
+    code: string | null;
+    grantType: string | null;
+  }) => void;
 };
 
 type FixtureRequest = {
@@ -204,6 +223,11 @@ function installMcpOAuthFixture(options: FixtureOptions = {}) {
       }
       const rpc = parsedBody as Record<string, unknown>;
       if (rpc.method === "tools/call") {
+        const override = options.toolCall?.({
+          token: headers.authorization?.replace(/^Bearer /, "") ?? null,
+          rpc,
+        });
+        if (override) return override;
         return jsonResponse({ jsonrpc: "2.0", id: rpc.id, result: {
           content: [{ type: "text", text: "Fixture meeting data" }],
           structuredContent: { meeting_id: "meeting-1" },
@@ -254,6 +278,11 @@ function installMcpOAuthFixture(options: FixtureOptions = {}) {
         if (!issued) return jsonResponse({ error: "invalid_grant" }, 400);
       }
       accessToken = `fixture-access-${randomUUID()}`;
+      options.onTokenIssued?.({
+        accessToken,
+        code: grantType === "authorization_code" ? body.get("code") : null,
+        grantType,
+      });
       return jsonResponse({
         access_token: accessToken,
         refresh_token: "fixture-refresh",
@@ -315,12 +344,14 @@ function createRouteApp(
     remoteHttpRequest?: NonNullable<Parameters<typeof toolAccessService>[1]>["remoteHttpRequest"];
   },
   requestLogger?: express.RequestHandler,
+  /** Act as a real signed-in member instead of the implicit local operator. */
+  sessionActor?: Express.Request["actor"],
 ) {
   const app = express();
   app.use(express.json());
   if (requestLogger) app.use(requestLogger);
   app.use((req, _res, next) => {
-    req.actor = {
+    req.actor = sessionActor ?? {
       type: "board",
       userId: "board-user",
       userName: "Board User",
@@ -473,6 +504,276 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
       await service.archiveConnection(connected.connectionId, company.id);
       await expect(gateway.executeTestCall({ companyId: company.id, connectionId: connected.connectionId, agentId: agent!.id, userId: "board-user", toolName: names[0]!, parameters: {} })).rejects.toThrow();
       expect((await db.select().from(toolConnections).where(eq(toolConnections.id, connected.connectionId)))[0]?.status).toBe("archived");
+    } finally {
+      method.defaults!.serverUrl = originalUrl;
+    }
+  });
+
+  it("keeps a Figma credential bound to the human who signed in", async () => {
+    // Figma's remote MCP authorizes as the signed-in Figma user, so the reviewed
+    // method is `grantKinds: ["user"]`: the token belongs to one person. The
+    // fixture models a provider that serves each caller only their own private
+    // file, so the cross-user case is observable: the only way user A's token can
+    // fail to read user B's file is if Paperclip ever resolved someone else's
+    // credential for the call.
+    const method = APP_DEFINITIONS.find((app) => app.slug === "figma")!.methods[0]!;
+    const originalUrl = method.defaults!.serverUrl;
+    method.defaults!.serverUrl = MCP_URL;
+    const FIGMA_TOOLS = [
+      { name: "get_file", description: "Read a Figma file", annotations: { readOnlyHint: true } },
+      { name: "create_design_system_rules", description: "Write rules", annotations: { readOnlyHint: false } },
+    ];
+    const OWNER = "board-user";
+    const OTHER_USER = "figma-peer";
+    const ownPrivateFile = `${OWNER}-private-file`;
+    const peerPrivateFile = `${OTHER_USER}-private-file`;
+    // Every token the fixture issues is recorded, whether or not an owner is
+    // known. A sentinel that is not OWNER keeps the "unowned token" case visible:
+    // if Paperclip ever resolved an unexpected credential, the map grows or holds
+    // a value that is not the owner, and the assertions below fail.
+    const UNOWNED = "<unowned-or-unknown-credential>";
+    const codeOwners = new Map<string, string>();
+    const tokenOwners = new Map<string, string>();
+    const issuedTokens: string[] = [];
+    try {
+      const fixture = installMcpOAuthFixture({
+        auth: "oauth",
+        tools: FIGMA_TOOLS,
+        onTokenIssued: ({ accessToken, code }) => {
+          issuedTokens.push(accessToken);
+          tokenOwners.set(accessToken, (code ? codeOwners.get(code) : undefined) ?? UNOWNED);
+        },
+        toolCall: ({ token, rpc }) => {
+          const arguments_ = (rpc.params as { arguments?: { fileKey?: string } } | undefined)?.arguments;
+          const fileKey = arguments_?.fileKey;
+          if (!fileKey) return null;
+          const owner = token ? tokenOwners.get(token) : undefined;
+          // Anything the token's own user did not create stays private, exactly
+          // as Figma scopes file access to the authorized account.
+          if (!owner || fileKey !== `${owner}-private-file`)
+            return jsonResponse({
+              jsonrpc: "2.0",
+              id: rpc.id,
+              error: { code: -32001, message: "Not found" },
+            });
+          return jsonResponse({
+            jsonrpc: "2.0",
+            id: rpc.id,
+            result: {
+              content: [{ type: "text", text: `Private design file owned by ${owner}` }],
+              structuredContent: { file_key: fileKey, owner },
+            },
+          });
+        },
+      });
+      const company = await createCompany(db);
+      await db.insert(companyMemberships).values({
+        companyId: company.id,
+        principalType: "user",
+        principalId: OTHER_USER,
+        status: "active",
+        membershipRole: "member",
+      });
+      const service = toolAccessService(db);
+      const actor = { actorType: "user" as const, actorId: OWNER };
+
+      // An organization-wide Figma credential is refused before any consent
+      // screen: there is no company-wide Figma identity to authorize.
+      await expect(service.connectGalleryApp(company.id, {
+        galleryKey: "figma", connectionMethodKey: "mcp-oauth", grantKind: "organization",
+      }, actor)).rejects.toThrow(/supports only user credentials/);
+
+      // The reviewed method is `ownershipModes: ["customer"]`, because Figma
+      // refuses RFC 7591 registration for an unreviewed client, so the operator
+      // supplies the Figma-reviewed client itself. `acceptsCustomerOAuthClient` is
+      // what permits that on a curated method, and no registration request may
+      // leave the instance.
+      const connected = await service.connectGalleryApp(company.id, {
+        galleryKey: "figma", connectionMethodKey: "mcp-oauth", grantKind: "user",
+        oauthClient: { clientId: "figma-reviewed-client", clientSecret: "figma-reviewed-secret" },
+      }, actor);
+      expect(connected.connection).toMatchObject({ credentialPolicy: "per_user" });
+
+      const start = await service.startOAuth(company.id, connected.connectionId, {
+        redirectUri: REDIRECT_URI, actor,
+      });
+      const authorizationUrl = new URL(start.authorizationUrl);
+      expect(start.registrationSource).toBe("manual");
+      expect(authorizationUrl.searchParams.get("client_id")).toBe("figma-reviewed-client");
+      // The refused-registration fix, asserted rather than assumed: no RFC 7591
+      // request is made at all.
+      expect(fixture.requestsTo("/register")).toHaveLength(0);
+      // The reviewed scope allowlist is sent verbatim, exactly one scope wide.
+      expect(authorizationUrl.searchParams.get("scope")).toBe("mcp:connect");
+      expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      const authorizationCode = fixture.issueAuthorizationCode(start.authorizationUrl);
+      codeOwners.set(authorizationCode, OWNER);
+      const completed = await service.completeOAuthCallback({
+        state: authorizationUrl.searchParams.get("state")!,
+        code: authorizationCode,
+        redirectUri: REDIRECT_URI,
+        actor,
+      });
+      expect(completed.actions.readOnly.map((action) => action.toolName)).toEqual(["get_file"]);
+
+      // One grant, on the user who signed in, holding the token as a secret ref.
+      const grants = await db.select().from(connectionGrants)
+        .where(eq(connectionGrants.connectionId, connected.connectionId));
+      expect(grants).toEqual([
+        expect.objectContaining({ kind: "user", subjectUserId: OWNER, status: "active" }),
+      ]);
+      expect(grants[0]!.credentialSecretRefs.map((ref) => ref.configPath)).toContain("oauth.access_token");
+      expect(JSON.stringify(grants)).not.toContain("fixture-access-");
+
+      const [agent] = await db.insert(agents).values({
+        companyId: company.id,
+        name: `Figma agent ${randomUUID()}`,
+        role: "engineer",
+        status: "active",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+      }).returning();
+      // `connected.catalog` was captured before sign-in, so it carries no
+      // discovered tools and enabling from it would leave every tool off.
+      const refreshed = await service.refreshCatalog(connected.connectionId, actor);
+      expect(refreshed.catalog.map((entry) => entry.toolName)).toContain("get_file");
+      await service.finishGalleryAppConnection(company.id, connected.connectionId, {
+        enabledCatalogEntryIds: refreshed.catalog.map((entry) => entry.id),
+        askFirstCatalogEntryIds: [],
+        access: { agentIds: [agent!.id] },
+      }, actor);
+      const gateway = createToolGatewayService(db, { toolActionSigningSecret: "figma-test-only-signing-secret" });
+
+      // The authorized path works and the call carries the owner's own token.
+      await expect(gateway.executeTestCall({
+        companyId: company.id,
+        connectionId: connected.connectionId,
+        agentId: agent!.id,
+        userId: OWNER,
+        toolName: "get_file",
+        parameters: { fileKey: ownPrivateFile },
+      })).resolves.toMatchObject({
+        decision: "allowed",
+        result: { data: { structuredContent: { owner: OWNER } } },
+      });
+
+      // Snapshot the outbound credential state before the peer's call so the peer's
+      // own requests can be isolated from the owner's.
+      const ownerToken = issuedTokens[0];
+      expect(ownerToken).toMatch(/^fixture-access-/);
+      const tokensBeforePeerCall = new Set(
+        fixture.requestsTo("/mcp").map((call) => call.headers.authorization),
+      );
+
+      // A peer in the same company cannot read through this connection. The
+      // credential is per-user, so the peer has no grant on it at all: the
+      // gateway refuses locally with `user_authorization_required` and no
+      // credential leaves the instance. That is the boundary the per-user grant is
+      // supposed to enforce, and it is stronger than "the call fails at the
+      // provider" — the peer's private file never becomes reachable in the first
+      // place.
+      const peerAttempt = await gateway
+        .executeTestCall({
+          companyId: company.id,
+          connectionId: connected.connectionId,
+          agentId: agent!.id,
+          userId: OTHER_USER,
+          toolName: "get_file",
+          parameters: { fileKey: peerPrivateFile },
+        })
+        .then((value) => ({ value }))
+        .catch((error) => ({ error }));
+      expect(peerAttempt).toMatchObject({
+        value: {
+          decision: "allowed",
+          error: {
+            message: "User authorization is required",
+            reasonCode: "user_authorization_required",
+          },
+        },
+      });
+      // And no peer content, under any outcome shape.
+      expect(JSON.stringify(peerAttempt)).not.toContain(
+        `Private design file owned by ${OTHER_USER}`,
+      );
+      // Nothing the peer triggered carried a credential to the provider.
+      const peerCallCredentials = [
+        ...new Set(
+          fixture
+            .requestsTo("/mcp")
+            .map((call) => call.headers.authorization)
+            .filter(
+              (authorization): authorization is string =>
+                authorization !== undefined &&
+                !tokensBeforePeerCall.has(authorization),
+            ),
+        ),
+      ];
+      expect(peerCallCredentials).toEqual([]);
+      // Every authenticated `/mcp` call goes out with a bearer token, and the only
+      // credential ever on the wire for this connection is the owner's issued
+      // token, byte for byte. Unauthenticated requests are expected: the catalog
+      // is refreshed and listed once before sign-in completes.
+      const authenticatedMcpCalls = fixture
+        .requestsTo("/mcp")
+        .filter((call) => call.headers.authorization !== undefined);
+      expect(authenticatedMcpCalls.length).toBeGreaterThan(0);
+      expect([
+        ...new Set(authenticatedMcpCalls.map((call) => call.headers.authorization)),
+      ]).toEqual([`Bearer ${ownerToken}`]);
+      // The decisive proof, and not a tautology this time: the fixture recorded
+      // *every* token it issued, mapping anything it could not attribute to a
+      // sentinel that is not the owner. One token was issued, and it belongs to
+      // the owner. An earlier revision of this assertion read
+      // `[...tokenOwners.values()].every((owner) => owner === OWNER)`, which
+      // could never fail because only an owner's token was ever recorded in the
+      // first place — it proved nothing about the per-user boundary.
+      expect(issuedTokens).toHaveLength(1);
+      expect(tokenOwners.size).toBe(1);
+      expect([...tokenOwners.values()]).toEqual([OWNER]);
+      // The connection's existence is company-scoped, so a peer legitimately sees
+      // it in the list: `filterVisibleToolConnections` withholds only *draft*
+      // connections from non-managers, and this one is connected. What the peer
+      // must not get is the owner's credential, and that boundary is the 404
+      // below — the peer cannot drive the OAuth flow for someone else's
+      // per-user grant.
+      const peerApp = createRouteApp(
+        db,
+        undefined,
+        undefined,
+        {
+          type: "board",
+          userId: OTHER_USER,
+          sessionId: `session-${OTHER_USER}`,
+          userName: "Peer user",
+          userEmail: null,
+          isInstanceAdmin: false,
+          source: "session",
+          companyIds: [company.id],
+          memberships: [{ companyId: company.id, membershipRole: "member", status: "active" }],
+        },
+      );
+      const listed = await request(peerApp)
+        .get(`/api/companies/${company.id}/tools/connections`)
+        .expect(200);
+      const peerView = listed.body.connections.find(
+        (entry: { id: string }) => entry.id === connected.connectionId,
+      );
+      // Visible, but with no route back to the owner's token.
+      expect(peerView?.status).toBe("active");
+      expect(JSON.stringify(peerView)).not.toContain("fixture-access-");
+      // And the peer cannot drive the OAuth flow for someone else's per-user
+      // grant: the connection is pinned to the identity that signed in first, so
+      // a different board user is refused by name rather than silently handed a
+      // credential.
+      await expect(service.startOAuth(company.id, connected.connectionId, {
+        redirectUri: REDIRECT_URI,
+        actor: { actorType: "user", actorId: OTHER_USER },
+      })).rejects.toMatchObject({
+        status: 403,
+        message: expect.stringContaining("Only the existing personal identity"),
+      });
     } finally {
       method.defaults!.serverUrl = originalUrl;
     }

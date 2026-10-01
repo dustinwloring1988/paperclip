@@ -274,7 +274,7 @@ describe("AppDefinition catalog", () => {
         "google-workspace-search",
       ]),
     );
-    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(48);
+    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(52);
     expect(BLOCKED_MCP_PROVIDERS.map((entry) => entry.slug)).toEqual([
       "g2",
       "vercel",
@@ -427,15 +427,21 @@ describe("AppDefinition catalog", () => {
     expect(channel("slack")?.guidanceMd).toContain("reactions");
     expect(channel("slack")?.guidanceMd).toContain("direct messages");
   });
-  it("keeps a complete, unique, dated evidence ledger for all 51 researched MCP providers", () => {
-    // Ledger-wide date reflects the last full re-verification (2026-08-26);
-    // later provider additions carry their own research evidence, but
-    // bumping the shared date would overstate freshness for the other providers.
-    expect(SELF_SERVE_MCP_RESEARCH.verifiedAt).toBe("2026-08-26");
-    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(51);
+  it("keeps a complete, unique, dated evidence ledger for all 55 researched MCP providers", () => {
+    // The date is the most recent verification pass, not a per-entry claim. The
+    // 2026-08-26 pass covered the first 51 providers; Intercom, Figma, Exa, and
+    // Apify were re-probed against live metadata on 2026-09-30. Do not read the
+    // shared date as saying every entry was re-checked that day — each provider
+    // doc records its own probe evidence and open questions.
+    expect(SELF_SERVE_MCP_RESEARCH.verifiedAt).toBe("2026-09-30");
+    // The caveat now travels with the data, not only with this comment.
+    expect(SELF_SERVE_MCP_RESEARCH.verifiedAtNote).toContain("2026-09-30");
+    for (const slug of ["intercom", "figma", "exa", "apify"])
+      expect(SELF_SERVE_MCP_RESEARCH.verifiedAtNote).toContain(slug);
+    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(55);
     expect(
       new Set(SELF_SERVE_MCP_RESEARCH.entries.map((entry) => entry.slug)),
-    ).toHaveProperty("size", 51);
+    ).toHaveProperty("size", 55);
     for (const entry of SELF_SERVE_MCP_RESEARCH.entries) {
       expect(new URL(entry.docsUrl).protocol).toBe("https:");
       expect(new URL(entry.serverUrl).protocol).toBe("https:");
@@ -457,6 +463,264 @@ describe("AppDefinition catalog", () => {
       credentialFields: [{ key: "authorization", secret: true, type: "password", required: true }],
       keyPlacement: { location: "header", name: "Authorization", prefix: "Bearer " },
     });
+  });
+
+  it("routes both Intercom regions to the right host and leaves OAuth to discovery", () => {
+    const app = APP_STORE_DEFINITIONS.find((entry) => entry.slug === "intercom")!;
+    // Both hosts have to be recognized or a pasted EU URL drops into the
+    // generic connector instead of this curated definition.
+    expect(getAppDefinitionForUrl("https://mcp.intercom.com/mcp")?.slug).toBe("intercom");
+    expect(getAppDefinitionForUrl("https://mcp.eu.intercom.com/mcp")?.slug).toBe("intercom");
+    expect(getAppDefinitionForUrl("https://mcp.intercom.com/sse")?.slug).toBe("intercom");
+    expect(getAppDefinitionForUrl("https://mcp.eu.intercom.com/sse")?.slug).toBe("intercom");
+    expect(getAppDefinitionForUrl("https://mcp.au.intercom.com/mcp")).toBeNull();
+    expect(app.urlPatterns).toEqual([
+      "https://mcp.intercom.com/*",
+      "https://mcp.eu.intercom.com/*",
+    ]);
+    expect(app.categories).toEqual(["communication"]);
+    expect(app.docsUrl).toBe("https://developers.intercom.com/docs/guides/mcp");
+    expect(app.setupPrerequisite?.description).toContain("AU hosted workspaces");
+    expect(app.setupPrerequisite?.actionUrl).toBe(
+      "https://developers.intercom.com/docs/guides/mcp",
+    );
+    expect(
+      app.methods.map((method) => ({
+        key: method.key,
+        label: method.label,
+        serverUrl: method.defaults?.serverUrl,
+        metadataUrl: method.defaults?.metadataUrl,
+      })),
+    ).toEqual([
+      {
+        key: "mcp-oauth-us",
+        label: "US hosted workspace",
+        serverUrl: "https://mcp.intercom.com/mcp",
+        // Intercom's US host publishes authorization-server metadata only at
+        // the origin form of RFC 8414. See the RFC 9728 note below.
+        metadataUrl:
+          "https://mcp.intercom.com/.well-known/oauth-authorization-server",
+      },
+      {
+        key: "mcp-oauth-eu",
+        label: "EU hosted workspace",
+        serverUrl: "https://mcp.eu.intercom.com/mcp",
+        // The EU host is a separate deployment with its own issuer, so the hint
+        // has to be region-specific. Reusing the US document would point an EU
+        // workspace's token exchange at the US region.
+        metadataUrl:
+          "https://mcp.eu.intercom.com/.well-known/oauth-authorization-server",
+      },
+    ]);
+    for (const method of app.methods) {
+      expect(method).toMatchObject({
+        transport: "mcp_remote",
+        auth: "oauth",
+        ownershipModes: ["dcr"],
+        riskTier: "S3",
+        requiredResourceFilters: ["workspace", "inbox", "team"],
+      });
+      // Paperclip sends `scopesHint` verbatim as the OAuth `scope` parameter and
+      // Intercom's AS metadata advertises no `scopes_supported` at all (verified
+      // on both hosts 2026-09-30), so nothing on the wire checks these. They are
+      // Intercom's own strings from its OAuth Scopes page, not shortened or
+      // recased: "Read users and companies" is missing "and list", and the
+      // articles scope is capitalised differently there than on the MCP guide.
+      expect(method.defaults?.scopesHint).toEqual([
+        "Read and list users and companies",
+        "Read conversations",
+        "Write conversations",
+        "Read and Write Articles",
+      ]);
+      expect(method.warnings?.join(" ")).toContain("AU hosted workspaces are not supported");
+      // Every Intercom endpoint lives on the method's own regional host. A hint
+      // that crosses regions silently sends a workspace's data to the wrong one.
+      const host = new URL(method.defaults!.serverUrl!).host;
+      expect(new URL(method.defaults!.metadataUrl!).host).toBe(host);
+    }
+    // Intercom publishes no RFC 9728 protected-resource metadata, so the hint is
+    // the origin-form RFC 8414 document, named rather than left to discovery.
+    // Shipping a fixed authorization/token *pair* instead would switch discovery
+    // off entirely (see `oauthEndpointsForConnection`), which also drops the
+    // discovery result's `registration_endpoint` and leaves DCR with nothing to
+    // register against. Pin the reviewed shape so nobody "fixes" this the wrong
+    // way.
+    for (const method of app.methods) {
+      expect(method.defaults?.authorizationEndpoint).toBeUndefined();
+      expect(method.defaults?.tokenEndpoint).toBeUndefined();
+    }
+    expect(getRecommendedConnectionMethod(app.methods)?.key).toBe("mcp-oauth-us");
+  });
+  it("documents why Intercom needs an OAuth metadata hint and Figma does not", () => {
+    const intercom = APP_STORE_DEFINITIONS.find((entry) => entry.slug === "intercom")!;
+    const figma = APP_STORE_DEFINITIONS.find((entry) => entry.slug === "figma")!;
+    // The negative case, pinned so the reason survives. Intercom serves no
+    // RFC 9728 document at all: `GET /mcp` answers 401 with
+    // `Bearer realm="OAuth", error="invalid_token", error_description="Missing
+    // or invalid access token"` and no `resource_metadata` parameter, so
+    // `challengeOAuthHints` yields nothing, and both
+    // `/.well-known/oauth-protected-resource/mcp` and
+    // `/.well-known/oauth-protected-resource` answer 404. There is therefore no
+    // advertised authorization server to follow — the only RFC 9728 route to an
+    // issuer is broken. `defaults.metadataUrl` is what names the working
+    // origin-form RFC 8414 document instead, and it is honored in two places:
+    // `preflightGalleryAppMetadata` queues it ahead of the derived candidates,
+    // and `oauthProviderEndpoints` refuses to resolve any endpoint at all
+    // without it. Both are load-bearing, so the key is asserted here rather than
+    // left to a comment.
+    for (const method of intercom.methods) {
+      expect(method.defaults?.metadataUrl).toMatch(
+        /^https:\/\/mcp(\.eu)?\.intercom\.com\/\.well-known\/oauth-authorization-server$/,
+      );
+    }
+    // Figma is the control case and proves the hint is not cargo-culted. Its
+    // RFC 9728 chain resolves on the *first* candidate:
+    // `https://mcp.figma.com/.well-known/oauth-protected-resource/mcp` answers
+    // 200 with `authorization_servers: ["https://api.figma.com"]`, and
+    // `https://api.figma.com/.well-known/oauth-authorization-server` then
+    // supplies authorization, token and registration endpoints. Nothing is
+    // wasted probing, so a hint would only add a second source of truth to keep
+    // in step with Figma's own documents.
+    expect(figma.methods[0]?.defaults?.metadataUrl).toBeUndefined();
+    expect(figma.methods[0]?.defaults?.discoveryUrl).toBeUndefined();
+  });
+  it("scopes Figma to one user, one reviewed scope, and a customer-owned client", () => {
+    const app = APP_STORE_DEFINITIONS.find((entry) => entry.slug === "figma")!;
+    expect(getAppDefinitionForUrl("https://mcp.figma.com/mcp")?.slug).toBe("figma");
+    expect(app.categories).toEqual(["content"]);
+    expect(app.docsUrl).toBe("https://developers.figma.com/docs/figma-mcp-server/");
+    expect(app.methods.map((method) => method.key)).toEqual(["mcp-oauth"]);
+    const method = app.methods[0]!;
+    expect(method).toMatchObject({
+      transport: "mcp_remote",
+      auth: "oauth",
+      // `dcr` is deliberately absent. Figma advertises
+      // `registration_endpoint: https://api.figma.com/v1/oauth/mcp/register` but
+      // that endpoint answers 403 Forbidden for every payload shape tried
+      // (measured 2026-09-30), and Figma documents that only clients in its MCP
+      // catalog may connect. `customer` is the only mode that can work: the
+      // operator signs in with a Figma-reviewed client ID and secret, or the
+      // deployment preconfigures them. Shipping `dcr` sends a default operator
+      // into `502 oauth_dynamic_client_registration_failed`.
+      ownershipModes: ["customer"],
+      grantKinds: ["user"],
+      riskTier: "S3",
+      defaults: {
+        serverUrl: "https://mcp.figma.com/mcp",
+        scopesHint: ["mcp:connect"],
+      },
+      requiredResourceFilters: ["team", "project", "file"],
+    });
+    // Discovery works on Figma, so the manifest must not pin the endpoints.
+    expect(method.defaults?.authorizationEndpoint).toBeUndefined();
+    expect(method.defaults?.tokenEndpoint).toBeUndefined();
+    // The refused registration and the seat-limit table have to be visible before
+    // credentials: a wrong-seat connection connects cleanly and then delivers
+    // nothing, and a DCR-shaped attempt fails at registration.
+    const warnings = method.warnings?.join(" ") ?? "";
+    expect(warnings).toContain("v1/oauth/mcp/register");
+    expect(warnings).toContain("403");
+    expect(warnings).toContain("Figma-reviewed");
+    expect(app.setupPrerequisite?.title).toBe("A seat that can actually use MCP");
+    expect(app.setupPrerequisite?.steps?.join(" ")).toContain("Seat type");
+    // The seat numbers are quoted from Figma's rate-limits page, which is also
+    // where the copy says the source lives, and the Starter disagreement between
+    // that page and Figma's mcp-server-guide is stated rather than smoothed over.
+    const prerequisite = app.setupPrerequisite?.description ?? "";
+    expect(prerequisite).toContain(
+      "developers.figma.com/docs/figma-mcp-server/rate-limits-access/",
+    );
+    expect(prerequisite).toContain("up to 20 tool calls a month on Starter");
+    expect(prerequisite).toContain("up to 6 a month on Professional");
+    expect(prerequisite).toContain("mcp-server-guide");
+    expect(prerequisite).not.toContain("6 read tool calls per month");
+  });
+  it("offers Exa browser sign-in or a vaulted x-api-key on the hosted server", () => {
+    const app = APP_STORE_DEFINITIONS.find((entry) => entry.slug === "exa")!;
+    expect(getAppDefinitionForUrl("https://mcp.exa.ai/mcp")?.slug).toBe("exa");
+    expect(getAppDefinitionForUrl("https://mcp.exa.ai/mcp?login")?.slug).toBe("exa");
+    expect(app.categories).toEqual(["ai"]);
+    expect(app.docsUrl).toBe("https://exa.ai/docs/get-started/exa-mcp");
+    expect(app.methods.map((method) => method.key)).toEqual(["mcp-oauth", "mcp-api-key"]);
+    expect(app.methods[0]).toMatchObject({
+      transport: "mcp_remote",
+      auth: "oauth",
+      ownershipModes: ["dcr"],
+      // S1 reads: public web search and page fetches, no customer data.
+      riskTier: "S1",
+      // Exa documents interactive OAuth at `?login` and API-key mode at the bare
+      // URL. The bare URL answers anonymously, and the anonymous profile is the
+      // one without `agent_run` (measured 2026-09-30: two tools keyless, three
+      // with a bearer token), so the OAuth method must carry the query.
+      defaults: {
+        serverUrl: "https://mcp.exa.ai/mcp?login",
+        scopesHint: ["mcp:tools"],
+      },
+    });
+    expect(app.methods[1]).toMatchObject({
+      auth: "api_key",
+      ownershipModes: ["customer"],
+      riskTier: "S1",
+      defaults: { serverUrl: "https://mcp.exa.ai/mcp" },
+      credentialFields: [
+        { key: "authorization", secret: true, type: "password", required: true },
+      ],
+      // Exa's hosted server documents `x-api-key`. Its REST API also accepts
+      // Authorization: Bearer, so the default placement would be wrong here.
+      keyPlacement: { location: "header", name: "x-api-key", prefix: null },
+    });
+    // Exa Agent is billed usage, which is the one thing an operator must see
+    // before an agent can spend it unattended — and it needs OAuth *or* an API
+    // key, so the warning must not tell an operator that only a key works.
+    for (const method of app.methods) {
+      const warnings = method.warnings?.join(" ") ?? "";
+      expect(warnings).toContain("billed usage");
+      expect(warnings).toContain("requires OAuth or an API key");
+      expect(warnings).not.toContain("an Exa API key is required");
+    }
+  });
+  it("offers Apify browser sign-in or a vaulted bearer token on one hosted endpoint", () => {
+    const app = APP_STORE_DEFINITIONS.find((entry) => entry.slug === "apify")!;
+    // Apify's MCP server is one endpoint, not one per Actor. Actors are selected
+    // through the tools query parameter and run against the signed-in account.
+    expect(getAppDefinitionForUrl("https://mcp.apify.com/")?.slug).toBe("apify");
+    expect(getAppDefinitionForUrl("https://mcp.apify.com/sse")?.slug).toBe("apify");
+    expect(app.categories).toEqual(["developer"]);
+    expect(app.docsUrl).toBe("https://docs.apify.com/platform/integrations/mcp");
+    expect(app.methods.map((method) => method.key)).toEqual(["mcp-oauth", "mcp-api-key"]);
+    // Apify's own MCP telemetry is enabled by default for every tool call and the
+    // documented remote opt-out is the `telemetry-enabled=false` query parameter,
+    // so both methods ship the opt-out URL. The path stays `/` because
+    // `protectedResourceMetadataUrls` reads only the path: an empty path derives
+    // the origin-form RFC 9728 candidate, which is the only form Apify serves.
+    const TELEMETRY_OFF = "https://mcp.apify.com/?telemetry-enabled=false";
+    expect(app.methods[0]).toMatchObject({
+      transport: "mcp_remote",
+      auth: "oauth",
+      ownershipModes: ["dcr"],
+      riskTier: "S2",
+      defaults: { serverUrl: TELEMETRY_OFF, scopesHint: ["full_api_access"] },
+      requiredResourceFilters: ["account", "actor", "dataset"],
+    });
+    expect(app.methods[1]).toMatchObject({
+      auth: "api_key",
+      riskTier: "S2",
+      defaults: { serverUrl: TELEMETRY_OFF },
+      credentialFields: [
+        { key: "authorization", secret: true, type: "password", required: true },
+      ],
+      keyPlacement: { location: "header", name: "Authorization", prefix: "Bearer " },
+      consoleLinks: { keys: "https://console.apify.com/account/integrations" },
+      requiredResourceFilters: ["account", "actor", "dataset"],
+    });
+    for (const method of app.methods) {
+      const warnings = method.warnings?.join(" ") ?? "";
+      expect(warnings).toContain("plan usage");
+      // The default-on telemetry collection has to be named, with the opt-out.
+      expect(warnings).toContain("collects telemetry");
+      expect(warnings).toContain("enabled by default");
+      expect(warnings).toContain("telemetry-enabled=false");
+    }
   });
 
   it("uses the reviewed current endpoints and configuration modes", () => {
@@ -719,7 +983,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(56);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(60);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );

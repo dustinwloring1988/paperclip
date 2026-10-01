@@ -900,6 +900,7 @@ const researchManifest = JSON.parse(
 );
 const categoryBySlug = {
   airtable: "data",
+  apify: "developer",
   asana: "productivity",
   beehiiv: "content",
   bitly: "analytics",
@@ -912,8 +913,11 @@ const categoryBySlug = {
   coda: "productivity",
   egnyte: "content",
   embat: "commerce",
+  exa: "ai",
+  figma: "content",
   fireflies: "productivity",
   "hugging-face": "ai",
+  intercom: "communication",
   jira: "productivity",
   kernel: "developer",
   "local-falcon": "analytics",
@@ -948,6 +952,70 @@ const categoryBySlug = {
   youcom: "ai",
   zapier: "productivity",
 };
+// App-level review data the per-slug maps above cannot express: a prerequisite an
+// operator must clear before consent, more than one recognized host, and the
+// store description. Kept as data so the ledger stays the single reviewed input.
+const descriptionBySlug = {
+  apify: "Run web scraping and data extraction Actors and read their results.",
+  exa: "Search the web and fetch page content for agents.",
+  figma: "Read Figma files, comments, and design data.",
+  fireflies:
+    "Search meeting transcripts, read summaries and action items, and connect meeting-ready routines.",
+  honcho: "Remember conversations and retrieve context about peers.",
+  intercom:
+    "Search Intercom conversations, users, and Help Center articles.",
+  mem0: "Remember preferences, conversations, events, and agent state.",
+  supermemory:
+    "Search and save shared memories, documents, and profiles.",
+  zep: "Retrieve temporal graph memory and authorized business context.",
+};
+const appExtrasBySlug = {
+  figma: {
+    setupPrerequisite: {
+      title: "A seat that can actually use MCP",
+      // Source: Figma's developer page "Rate limits & access"
+      // (https://developers.figma.com/docs/figma-mcp-server/rate-limits-access/),
+      // read 2026-09-30. Two of Figma's own published sources disagree on the
+      // View/Collab figure, so the copy follows the developer page and says so
+      // instead of picking a number silently:
+      //   developer page table — Starter up to 20/month, Professional /
+      //     Organization / Enterprise up to 6/month
+      //   the same page's "What if I'm rate-limited?" list repeats 20 for
+      //     Starter, but attributes 200/day to Organization and 600/day to
+      //     Enterprise while the table prints 600/day under Organization and
+      //     leaves Enterprise blank
+      //   Figma's mcp-server-guide README says Starter, or View/Collab seats on
+      //     paid plans, get "up to 6 tool calls per month"
+      description:
+        "Figma caps MCP by seat and plan, not by plan alone, and the numbers come from Figma's own rate-limits page (developers.figma.com/docs/figma-mcp-server/rate-limits-access/): a View or Collab seat gets up to 20 tool calls a month on Starter and up to 6 a month on Professional, Organization, and Enterprise, while a Dev or Full seat gets 200/day and 10/min on Starter, 200/day and 15/min on Professional, and 600/day and 20/min on Organization (the page leaves the Enterprise cell blank). Figma's two published sources disagree about Starter: this page says 20 a month, while Figma's mcp-server-guide README says 6 a month, and this copy follows the developer page. Limits apply to tools that read from Figma, so writes are exempt. A connection on the wrong seat connects cleanly, reports healthy, and then delivers almost nothing.",
+      steps: [
+        "Check the seat type on the person signing in: Figma → Settings → Seat type.",
+        "Move to a Dev or Full seat before connecting if agents need more than a handful of calls.",
+        "Confirm the files and projects agents need are reachable by that person, not only by an admin.",
+      ],
+      actionLabel: "Open Figma MCP docs",
+      actionUrl: "https://developers.figma.com/docs/figma-mcp-server/",
+    },
+  },
+  intercom: {
+    // Two hosts, one provider. Intercom serves a separate MCP endpoint per data
+    // region, so recognition has to cover both or a pasted EU URL falls through
+    // to the generic connector.
+    urlPatterns: ["https://mcp.intercom.com/*", "https://mcp.eu.intercom.com/*"],
+    setupPrerequisite: {
+      title: "A US or EU hosted Intercom workspace",
+      description:
+        "Intercom hosts workspaces in three regions and serves one MCP endpoint per region. AU hosted workspaces are not supported by the MCP server at all. Pick the region from the workspace URL: app.intercom.com is US, app.eu.intercom.com is EU. EU requests are processed inside the EU under Intercom's regional data hosting commitment.",
+      steps: [
+        "Open your Intercom workspace URL and confirm it is app.intercom.com or app.eu.intercom.com.",
+        "Sign in with an admin who can see the inboxes, teams, and articles agents should work with.",
+        "Connect the matching region; an EU workspace cannot be reached through the US endpoint.",
+      ],
+      actionLabel: "Open the Intercom MCP guide",
+      actionUrl: "https://developers.intercom.com/docs/guides/mcp",
+    },
+  },
+};
 const oauthMethodFor = (
   entry,
   key = "mcp-oauth",
@@ -978,6 +1046,11 @@ const customerOAuthMethodFor = (entry) =>
     consoleLinks: { register: entry.docsUrl, docs: entry.docsUrl },
   });
 const apiKeySpec = {
+  apify: {
+    name: "Authorization",
+    prefix: "Bearer ",
+    placeholder: "Paste your Apify API token",
+  },
   bitly: {
     name: "Authorization",
     prefix: "Bearer ",
@@ -992,6 +1065,14 @@ const apiKeySpec = {
     name: "Authorization",
     prefix: "Bearer ",
     placeholder: "Paste your Coda API token",
+  },
+  // Exa's hosted MCP server documents `x-api-key` for developer keys and OAuth
+  // for everyone else. Its REST API also accepts Authorization: Bearer, but the
+  // MCP server does not, so the placement must match its own documentation.
+  exa: {
+    name: "x-api-key",
+    prefix: null,
+    placeholder: "Paste your Exa API key",
   },
   kernel: {
     name: "X-API-Key",
@@ -1075,7 +1156,197 @@ const apiKeyMethodFor = (
     },
   );
 };
+// Intercom serves one MCP host per data region, and each host publishes
+// authorization-server metadata only at the origin form
+// `https://<host>/.well-known/oauth-authorization-server`. It publishes no
+// RFC 9728 protected-resource metadata: `GET /mcp` answers 401 with
+// `Bearer realm="OAuth", error="invalid_token", error_description="Missing or
+// invalid access token"` and no `resource_metadata` parameter, and both
+// `/.well-known/oauth-protected-resource/mcp` and
+// `/.well-known/oauth-protected-resource` answer 404. So there is no
+// authorization-server URL to follow out of protected-resource metadata, and the
+// chain has to reach the origin form on its own.
+//
+// Name that document explicitly instead. It is the same URL the discovery chain
+// would eventually probe (`wellKnownMetadataUrls` in tool-access.ts, appended
+// after the protected-resource candidates), so nothing is bypassed — but naming
+// it is what makes the preflight honest and the gallery fallback usable:
+// `preflightGalleryAppMetadata` queues `defaults.metadataUrl` ahead of the derived
+// candidates, and `oauthProviderEndpoints` can only read endpoints at all when
+// this key is present, because it throws when it is not.
+//
+// A fixed authorization/token *pair* would be worse than nothing here:
+// `oauthEndpointsForConnection` skips discovery entirely when a gallery method
+// carries both endpoints, and that skips the discovery result's
+// `registration_endpoint` too, leaving DCR with nothing to register against. So
+// both regions ship the metadata URL and neither ships the pair.
+// Paperclip sends `scopesHint` verbatim as the OAuth `scope` parameter, and
+// Intercom's AS metadata advertises no `scopes_supported` at all (verified on
+// both hosts 2026-09-30), so nothing validates these strings on the wire. They
+// are therefore copied from Intercom's own OAuth Scopes page
+// (https://developers.intercom.com/docs/build-an-integration/learn-more/authentication/oauth-scopes),
+// which is the list of scope strings Intercom itself offers as Developer Hub
+// checkboxes — not reworded, because a shortened or recased scope is not the same
+// permission. Note that Intercom's MCP guide writes the articles scope with a
+// lowercase "write"; the OAuth Scopes page writes it "Read and Write Articles",
+// and this list follows the OAuth Scopes page. A live token is still needed to
+// confirm the exact wire form.
+const intercomScopesHint = [
+  "Read and list users and companies",
+  "Read conversations",
+  "Write conversations",
+  "Read and Write Articles",
+];
+const intercomMethodDefaults = (host) => ({
+  serverUrl: `https://${host}/mcp`,
+  metadataUrl: `https://${host}/.well-known/oauth-authorization-server`,
+  scopesHint: intercomScopesHint,
+});
 const specialMethodsFor = (entry) => {
+  if (entry.slug === "intercom")
+    return [
+      oauthMethodFor(entry, "mcp-oauth-us", entry.serverUrl, {
+        label: "US hosted workspace",
+        whenToUse:
+          "Use the US endpoint for a workspace at app.intercom.com.",
+        defaults: intercomMethodDefaults("mcp.intercom.com"),
+        requiredResourceFilters: ["workspace", "inbox", "team"],
+      }),
+      oauthMethodFor(
+        entry,
+        "mcp-oauth-eu",
+        "https://mcp.eu.intercom.com/mcp",
+        {
+          label: "EU hosted workspace",
+          whenToUse:
+            "Use the EU endpoint for a workspace at app.eu.intercom.com, so requests stay inside the EU.",
+          defaults: intercomMethodDefaults("mcp.eu.intercom.com"),
+          requiredResourceFilters: ["workspace", "inbox", "team"],
+        },
+      ),
+    ];
+  // Figma's remote MCP authorizes as the signed-in Figma user and publishes a
+  // single `mcp:connect` scope. Figma refuses RFC 7591 dynamic registration for
+  // clients outside its MCP catalog — measured 2026-09-30:
+  // `POST https://api.figma.com/v1/oauth/mcp/register` (the advertised
+  // `registration_endpoint`) answers 403 Forbidden for every payload shape tried,
+  // and `POST https://api.figma.com/v1/oauth/register` answers 404. So the
+  // operative ownership mode is `customer`: the operator signs in with a
+  // Figma-reviewed client ID and secret, or a deployment preconfigures
+  // `PAPERCLIP_TOOL_OAUTH_FIGMA_CLIENT_ID` / `_SECRET`. Shipping `dcr` here would
+  // send a default operator down a path that ends in
+  // `502 oauth_dynamic_client_registration_failed`.
+  //
+  // The token endpoint advertises no public-client method, so whichever client is
+  // used is confidential and Paperclip stores the secret as an
+  // `oauth.client_secret` ref. Whether a customer-registered app can actually
+  // obtain a token is still UNVERIFIED — it needs a Figma-reviewed client.
+  if (entry.slug === "figma")
+    return [
+      oauthMethodFor(entry, "mcp-oauth", entry.serverUrl, {
+        grantKinds: ["user"],
+        ownershipModes: ["customer"],
+        defaults: { serverUrl: entry.serverUrl, scopesHint: ["mcp:connect"] },
+        guidanceMd: "Sign in with the Figma account whose files agents should read, using a client Figma has reviewed. The connection can only see what that person can already open in Figma.",
+        consoleLinks: {
+          register: "https://developers.figma.com/docs/rest-api/oauth-apps/",
+          settings: "https://www.figma.com/settings",
+          docs: entry.docsUrl,
+        },
+        warnings: [
+          entry.prerequisite,
+          "Figma refuses RFC 7591 dynamic client registration: POST https://api.figma.com/v1/oauth/mcp/register answers 403 for clients outside the Figma MCP catalog, so this connection signs in with a Figma-reviewed client ID and secret instead of registering one.",
+        ],
+        requiredResourceFilters: ["team", "project", "file"],
+      }),
+    ];
+  // Exa's hosted server answers anonymously, so sign-in is only about plan
+  // limits and Exa Agent, not about access. Exa documents three modes with three
+  // URLs: keyless is the bare endpoint, an API key is the bare endpoint plus
+  // `x-api-key`, and interactive OAuth is the bare endpoint plus `?login`. The
+  // anonymous profile is also the only one without Exa Agent — measured
+  // 2026-09-30, `tools/list` returns `web_search_exa` and `web_fetch_exa` with no
+  // credential and the same two plus `agent_run` with a bearer token. So the
+  // OAuth method has to carry `?login` or it would silently connect to the
+  // keyless profile and never expose `agent_run`. `agent_run` is billed usage,
+  // which is the one capability worth calling out before a connection starts
+  // spending it. `parseRemoteHttpEndpoint` accepts the query and both
+  // `protectedResourceMetadataUrls` and `canonicalResourceIndicator` read only
+  // the path, so discovery and the RFC 8707 `resource` are unchanged.
+  if (entry.slug === "exa")
+    return [
+      oauthMethodFor(entry, "mcp-oauth", "https://mcp.exa.ai/mcp?login", {
+        defaults: { serverUrl: "https://mcp.exa.ai/mcp?login", scopesHint: ["mcp:tools"] },
+        guidanceMd: "Sign in to Exa so searches use your team's rate limits instead of the free anonymous profile, and so Exa Agent is available.",
+        consoleLinks: {
+          keys: "https://dashboard.exa.ai/api-keys",
+          settings: "https://dashboard.exa.ai",
+          docs: entry.docsUrl,
+        },
+        warnings: [
+          entry.prerequisite,
+          "Exa Agent runs are billed usage on your Exa plan. Approve or disable agent_run before letting an agent use it unattended.",
+        ],
+      }),
+      apiKeyMethodFor(entry, "mcp-api-key", entry.serverUrl, {
+        guidanceMd: "Create a key in the Exa dashboard and paste it below. A key raises rate limits and enables Exa Agent; the keyless server still works without one. Exa's own instruction for API-key mode is the bare URL without ?login.",
+        consoleLinks: {
+          keys: "https://dashboard.exa.ai/api-keys",
+          docs: entry.docsUrl,
+        },
+        warnings: [
+          entry.prerequisite,
+          "Exa Agent runs are billed usage on your Exa plan. Approve or disable agent_run before letting an agent use it unattended.",
+        ],
+      }),
+    ];
+  // Apify's MCP server is one hosted endpoint, not one endpoint per Actor.
+  // Actors are selected through the `tools` query parameter and run against the
+  // authenticated account, so the boundary Paperclip can review is the account.
+  //
+  // Apify states that its own MCP telemetry is enabled by default for all tool
+  // calls, and that the remote opt-out is the `telemetry-enabled=false` query
+  // parameter. Both methods therefore default to the opt-out URL. The trailing
+  // slash stays because `protectedResourceMetadataUrls` reads only the path: an
+  // empty path derives the origin-form RFC 9728 candidate, which is the only
+  // form Apify serves (measured 2026-09-30: the origin form answers 200 and the
+  // path-aware form 404). Apify's documentation writes the same opt-out URL
+  // without the trailing slash; both reach the same endpoint.
+  const apifyServerUrl = "https://mcp.apify.com/?telemetry-enabled=false";
+  const apifyTelemetryWarning =
+    "Apify's MCP server collects telemetry about tool calls and MCP clients, and it is enabled by default. This connection opts out with telemetry-enabled=false on the server URL; that is Apify's opt-out, not a Paperclip telemetry setting.";
+  if (entry.slug === "apify")
+    return [
+      oauthMethodFor(entry, "mcp-oauth", apifyServerUrl, {
+        defaults: { serverUrl: apifyServerUrl, scopesHint: ["full_api_access"] },
+        guidanceMd: "Sign in to Apify so runs use the account's Actors, datasets, and plan usage. Paperclip records the intended account boundary; the provider enforces what the signed-in account can run.",
+        consoleLinks: {
+          keys: "https://console.apify.com/account/integrations",
+          settings: "https://console.apify.com/actors",
+          docs: entry.docsUrl,
+        },
+        warnings: [
+          entry.prerequisite,
+          apifyTelemetryWarning,
+          "Running an Actor spends the account's plan usage and can incur charges on metered plans.",
+        ],
+        requiredResourceFilters: ["account", "actor", "dataset"],
+      }),
+      apiKeyMethodFor(entry, "mcp-api-key", apifyServerUrl, {
+        defaults: { serverUrl: apifyServerUrl },
+        guidanceMd: "Open Apify Console → Integrations, copy an API token, and paste it below. Runs made through this connection spend that account's plan usage.",
+        consoleLinks: {
+          keys: "https://console.apify.com/account/integrations",
+          docs: entry.docsUrl,
+        },
+        warnings: [
+          entry.prerequisite,
+          apifyTelemetryWarning,
+          "Running an Actor spends the account's plan usage and can incur charges on metered plans.",
+        ],
+        requiredResourceFilters: ["account", "actor", "dataset"],
+      }),
+    ];
   if (entry.slug === "mem0" || entry.slug === "honcho") return [
     apiKeyMethodFor(entry, "mcp-api-key", entry.serverUrl, {
       guidanceMd: `Open the ${entry.name} dashboard, create an API key for the account agents should use, and paste it below.`,
@@ -1471,14 +1742,15 @@ for (const entry of researchManifest.entries) {
     schemaVersion: 1,
     slug: entry.slug,
     name: entry.name,
-    description: ({ mem0: "Remember preferences, conversations, events, and agent state.", zep: "Retrieve temporal graph memory and authorized business context.", supermemory: "Search and save shared memories, documents, and profiles.", honcho: "Remember conversations and retrieve context about peers." })[entry.slug] ?? (entry.slug === "fireflies"
-      ? "Search meeting transcripts, read summaries and action items, and connect meeting-ready routines."
-      : `Connect ${entry.name}'s provider-hosted MCP server.`),
+    description:
+      descriptionBySlug[entry.slug] ??
+      `Connect ${entry.name}'s provider-hosted MCP server.`,
     categories: [categoryBySlug[entry.slug] ?? "other"],
     featured: entry.slug === "jira",
     branding: brandingFor(entry.slug),
     urlPatterns: [`${new URL(entry.serverUrl).origin}/*`],
     docsUrl: entry.docsUrl,
+    ...(appExtrasBySlug[entry.slug] ?? {}),
     redirectConstraints: methods.some(
       (entryMethod) => entryMethod.auth === "oauth",
     )
@@ -1616,6 +1888,36 @@ for (const [slug, name, subscription, envKey] of [["anthropic", "Claude", true, 
  // Legacy REST entries have no tool execution adapter. Only offer the supported
  // AI account flow; saved REST connections remain removable through Connections.
  app.methods = [...methods, ...app.methods.filter(method => method.transport !== "rest_api")];
+}
+// Curated picks carry a `developerChoice` flag and a catalog `accentColor` the
+// connector card's brand badge reads. Both are curation, not corpus evidence, so
+// they live here rather than in a per-provider row — and they have to live
+// *somewhere* the generator owns. They used to be set by editing the emitted JSON
+// by hand, which meant every regeneration silently dropped them from all seven
+// entries. Set them in one pass so `ingest` is idempotent again.
+const developerChoiceAccentBySlug = {
+  cloudflare: "#F38020",
+  github: "#24292F",
+  netlify: "#00C7B7",
+  notion: "#000000",
+  posthog: "#F54E00",
+  stripe: "#635BFF",
+  supabase: "#3ECF8E",
+};
+for (const app of apps) {
+  const accentColor = developerChoiceAccentBySlug[app.slug];
+  if (!accentColor) continue;
+  app.branding = { ...app.branding, accentColor };
+  // Rebuild in place so `developerChoice` lands next to `featured` and
+  // regenerating does not churn key order in the emitted JSON.
+  const reordered = {};
+  for (const [key, value] of Object.entries(app)) {
+    reordered[key] = value;
+    if (key === "featured") reordered.developerChoice = true;
+  }
+  if (reordered.developerChoice !== true) reordered.developerChoice = true;
+  for (const key of Object.keys(app)) delete app[key];
+  Object.assign(app, reordered);
 }
 const validateApp = (app) => {
   if (

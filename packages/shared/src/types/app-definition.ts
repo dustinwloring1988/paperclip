@@ -28,6 +28,14 @@ export interface SelfServeMcpResearchEntry {
 
 export interface SelfServeMcpResearchManifest {
   schemaVersion: 1;
+  /**
+   * The date the ledger file itself was last touched. It is NOT a claim that
+   * every entry was re-probed that day: entries are researched independently and
+   * each provider's own doc records its probe evidence and open questions. Only
+   * the entries named in `verifiedAtNote` were re-probed on this date.
+   */
   verifiedAt: string;
+  /** Which entries were actually re-probed, and against what. */
+  verifiedAtNote?: string;
   entries: SelfServeMcpResearchEntry[];
 }

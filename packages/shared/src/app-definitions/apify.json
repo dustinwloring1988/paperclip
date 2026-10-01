@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "slug": "apify",
+  "name": "Apify",
+  "description": "Run web scraping and data extraction Actors and read their results.",
+  "categories": [
+    "developer"
+  ],
+  "featured": false,
+  "branding": {
+    "logoUrl": "/brands/apps/apify.svg"
+  },
+  "urlPatterns": [
+    "https://mcp.apify.com/*"
+  ],
+  "docsUrl": "https://docs.apify.com/platform/integrations/mcp",
+  "redirectConstraints": "https-or-loopback-http",
+  "methods": [
+    {
+      "key": "mcp-oauth",
+      "transport": "mcp_remote",
+      "auth": "oauth",
+      "ownershipModes": [
+        "dcr"
+      ],
+      "whenToUse": "Use browser sign-in for the provider-hosted MCP server.",
+      "defaults": {
+        "serverUrl": "https://mcp.apify.com/?telemetry-enabled=false",
+        "scopesHint": [
+          "full_api_access"
+        ]
+      },
+      "guidanceMd": "Sign in to Apify so runs use the account's Actors, datasets, and plan usage. Paperclip records the intended account boundary; the provider enforces what the signed-in account can run.",
+      "riskTier": "S2",
+      "label": "Sign in with Apify",
+      "consoleLinks": {
+        "keys": "https://console.apify.com/account/integrations",
+        "settings": "https://console.apify.com/actors",
+        "docs": "https://docs.apify.com/platform/integrations/mcp"
+      },
+      "warnings": [
+        "An Apify API token from Apify Console → Integrations, or browser sign-in. Running Actors spends the account's plan usage.",
+        "Apify's MCP server collects telemetry about tool calls and MCP clients, and it is enabled by default. This connection opts out with telemetry-enabled=false on the server URL; that is Apify's opt-out, not a Paperclip telemetry setting.",
+        "Running an Actor spends the account's plan usage and can incur charges on metered plans."
+      ],
+      "requiredResourceFilters": [
+        "account",
+        "actor",
+        "dataset"
+      ]
+    },
+    {
+      "key": "mcp-api-key",
+      "transport": "mcp_remote",
+      "auth": "api_key",
+      "ownershipModes": [
+        "customer"
+      ],
+      "whenToUse": "Use a restricted customer-owned key when browser sign-in is not suitable.",
+      "defaults": {
+        "serverUrl": "https://mcp.apify.com/?telemetry-enabled=false"
+      },
+      "guidanceMd": "Open Apify Console → Integrations, copy an API token, and paste it below. Runs made through this connection spend that account's plan usage.",
+      "riskTier": "S2",
+      "label": "Use an API key",
+      "credentialFields": [
+        {
+          "key": "authorization",
+          "label": "Apify API key",
+          "type": "password",
+          "required": true,
+          "placeholder": "Paste your Apify API token",
+          "secret": true
+        }
+      ],
+      "keyPlacement": {
+        "location": "header",
+        "name": "Authorization",
+        "prefix": "Bearer "
+      },
+      "consoleLinks": {
+        "keys": "https://console.apify.com/account/integrations",
+        "docs": "https://docs.apify.com/platform/integrations/mcp"
+      },
+      "warnings": [
+        "An Apify API token from Apify Console → Integrations, or browser sign-in. Running Actors spends the account's plan usage.",
+        "Apify's MCP server collects telemetry about tool calls and MCP clients, and it is enabled by default. This connection opts out with telemetry-enabled=false on the server URL; that is Apify's opt-out, not a Paperclip telemetry setting.",
+        "Running an Actor spends the account's plan usage and can incur charges on metered plans."
+      ],
+      "requiredResourceFilters": [
+        "account",
+        "actor",
+        "dataset"
+      ]
+    }
+  ]
+}

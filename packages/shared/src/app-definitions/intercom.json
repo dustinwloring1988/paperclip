@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "slug": "intercom",
+  "name": "Intercom",
+  "description": "Search Intercom conversations, users, and Help Center articles.",
+  "categories": [
+    "communication"
+  ],
+  "featured": false,
+  "branding": {
+    "logoUrl": "/brands/apps/intercom.svg",
+    "darkLogoUrl": "/brands/apps/intercom-dark.svg"
+  },
+  "urlPatterns": [
+    "https://mcp.intercom.com/*",
+    "https://mcp.eu.intercom.com/*"
+  ],
+  "docsUrl": "https://developers.intercom.com/docs/guides/mcp",
+  "setupPrerequisite": {
+    "title": "A US or EU hosted Intercom workspace",
+    "description": "Intercom hosts workspaces in three regions and serves one MCP endpoint per region. AU hosted workspaces are not supported by the MCP server at all. Pick the region from the workspace URL: app.intercom.com is US, app.eu.intercom.com is EU. EU requests are processed inside the EU under Intercom's regional data hosting commitment.",
+    "steps": [
+      "Open your Intercom workspace URL and confirm it is app.intercom.com or app.eu.intercom.com.",
+      "Sign in with an admin who can see the inboxes, teams, and articles agents should work with.",
+      "Connect the matching region; an EU workspace cannot be reached through the US endpoint."
+    ],
+    "actionLabel": "Open the Intercom MCP guide",
+    "actionUrl": "https://developers.intercom.com/docs/guides/mcp"
+  },
+  "redirectConstraints": "https-or-loopback-http",
+  "methods": [
+    {
+      "key": "mcp-oauth-us",
+      "transport": "mcp_remote",
+      "auth": "oauth",
+      "ownershipModes": [
+        "dcr"
+      ],
+      "whenToUse": "Use the US endpoint for a workspace at app.intercom.com.",
+      "defaults": {
+        "serverUrl": "https://mcp.intercom.com/mcp",
+        "metadataUrl": "https://mcp.intercom.com/.well-known/oauth-authorization-server",
+        "scopesHint": [
+          "Read and list users and companies",
+          "Read conversations",
+          "Write conversations",
+          "Read and Write Articles"
+        ]
+      },
+      "guidanceMd": "Connect Intercom in the browser. An Intercom workspace. AU hosted workspaces are not supported; EU hosted workspaces sign in through app.eu.intercom.com and need the EU MCP endpoint.",
+      "riskTier": "S3",
+      "label": "US hosted workspace",
+      "consoleLinks": {
+        "docs": "https://developers.intercom.com/docs/guides/mcp"
+      },
+      "warnings": [
+        "An Intercom workspace. AU hosted workspaces are not supported; EU hosted workspaces sign in through app.eu.intercom.com and need the EU MCP endpoint."
+      ],
+      "requiredResourceFilters": [
+        "workspace",
+        "inbox",
+        "team"
+      ]
+    },
+    {
+      "key": "mcp-oauth-eu",
+      "transport": "mcp_remote",
+      "auth": "oauth",
+      "ownershipModes": [
+        "dcr"
+      ],
+      "whenToUse": "Use the EU endpoint for a workspace at app.eu.intercom.com, so requests stay inside the EU.",
+      "defaults": {
+        "serverUrl": "https://mcp.eu.intercom.com/mcp",
+        "metadataUrl": "https://mcp.eu.intercom.com/.well-known/oauth-authorization-server",
+        "scopesHint": [
+          "Read and list users and companies",
+          "Read conversations",
+          "Write conversations",
+          "Read and Write Articles"
+        ]
+      },
+      "guidanceMd": "Connect Intercom in the browser. An Intercom workspace. AU hosted workspaces are not supported; EU hosted workspaces sign in through app.eu.intercom.com and need the EU MCP endpoint.",
+      "riskTier": "S3",
+      "label": "EU hosted workspace",
+      "consoleLinks": {
+        "docs": "https://developers.intercom.com/docs/guides/mcp"
+      },
+      "warnings": [
+        "An Intercom workspace. AU hosted workspaces are not supported; EU hosted workspaces sign in through app.eu.intercom.com and need the EU MCP endpoint."
+      ],
+      "requiredResourceFilters": [
+        "workspace",
+        "inbox",
+        "team"
+      ]
+    }
+  ]
+}

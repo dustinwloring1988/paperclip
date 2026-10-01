@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "slug": "exa",
+  "name": "Exa",
+  "description": "Search the web and fetch page content for agents.",
+  "categories": [
+    "ai"
+  ],
+  "featured": false,
+  "branding": {
+    "logoUrl": "/brands/apps/exa.svg",
+    "darkLogoUrl": "/brands/apps/exa-dark.svg"
+  },
+  "urlPatterns": [
+    "https://mcp.exa.ai/*"
+  ],
+  "docsUrl": "https://exa.ai/docs/get-started/exa-mcp",
+  "redirectConstraints": "https-or-loopback-http",
+  "methods": [
+    {
+      "key": "mcp-oauth",
+      "transport": "mcp_remote",
+      "auth": "oauth",
+      "ownershipModes": [
+        "dcr"
+      ],
+      "whenToUse": "Use browser sign-in for the provider-hosted MCP server.",
+      "defaults": {
+        "serverUrl": "https://mcp.exa.ai/mcp?login",
+        "scopesHint": [
+          "mcp:tools"
+        ]
+      },
+      "guidanceMd": "Sign in to Exa so searches use your team's rate limits instead of the free anonymous profile, and so Exa Agent is available.",
+      "riskTier": "S1",
+      "label": "Sign in with Exa",
+      "consoleLinks": {
+        "keys": "https://dashboard.exa.ai/api-keys",
+        "settings": "https://dashboard.exa.ai",
+        "docs": "https://exa.ai/docs/get-started/exa-mcp"
+      },
+      "warnings": [
+        "Browser sign-in works on its own. Exa Agent (agent_run) requires OAuth or an API key; the anonymous keyless profile has no Exa Agent.",
+        "Exa Agent runs are billed usage on your Exa plan. Approve or disable agent_run before letting an agent use it unattended."
+      ]
+    },
+    {
+      "key": "mcp-api-key",
+      "transport": "mcp_remote",
+      "auth": "api_key",
+      "ownershipModes": [
+        "customer"
+      ],
+      "whenToUse": "Use a restricted customer-owned key when browser sign-in is not suitable.",
+      "defaults": {
+        "serverUrl": "https://mcp.exa.ai/mcp"
+      },
+      "guidanceMd": "Create a key in the Exa dashboard and paste it below. A key raises rate limits and enables Exa Agent; the keyless server still works without one. Exa's own instruction for API-key mode is the bare URL without ?login.",
+      "riskTier": "S1",
+      "label": "Use an API key",
+      "credentialFields": [
+        {
+          "key": "authorization",
+          "label": "Exa API key",
+          "type": "password",
+          "required": true,
+          "placeholder": "Paste your Exa API key",
+          "secret": true
+        }
+      ],
+      "keyPlacement": {
+        "location": "header",
+        "name": "x-api-key",
+        "prefix": null
+      },
+      "consoleLinks": {
+        "keys": "https://dashboard.exa.ai/api-keys",
+        "docs": "https://exa.ai/docs/get-started/exa-mcp"
+      },
+      "warnings": [
+        "Browser sign-in works on its own. Exa Agent (agent_run) requires OAuth or an API key; the anonymous keyless profile has no Exa Agent.",
+        "Exa Agent runs are billed usage on your Exa plan. Approve or disable agent_run before letting an agent use it unattended."
+      ]
+    }
+  ]
+}

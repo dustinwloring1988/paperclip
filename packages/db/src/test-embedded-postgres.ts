@@ -206,6 +206,86 @@ const EMBEDDED_POSTGRES_START_MAX_ATTEMPTS = 5;
 // fresh port and a fresh data directory. On a failed attempt we stop the cluster
 // and remove its data directory before the next attempt. After the last attempt
 // we throw with the real Postgres output so the failure is loud and diagnosable.
+// Clusters this module started and has not yet stopped. `cleanup()` is driven by
+// vitest's afterAll hook, which never runs when a run is interrupted (Ctrl-C, a
+// killed shell, a crashed runner). On Windows the postgres process then outlives
+// the node process that spawned it, and every interrupted run leaks one more
+// cluster. A few dozen of those starve the CPU and the next run's own `beforeAll`
+// boot cannot finish inside the hook timeout — so the leak becomes the cause of
+// the next failure. Tracking the live clusters lets us stop them on the way out.
+type LiveEmbeddedPostgresCluster = {
+  instance: EmbeddedPostgresInstance;
+  dataDir: string;
+  /**
+   * Set once a stop has been issued. `stopAll` runs from `exit` *and* from the
+   * signal handler that precedes it, and `stop()` only resolves when the child
+   * exits — which never happens after the event loop is gone. Without this flag
+   * the second call would issue a second `taskkill` for a pid that is already
+   * dying.
+   */
+  stopping?: boolean;
+};
+
+const liveEmbeddedPostgresClusters = new Set<LiveEmbeddedPostgresCluster>();
+
+let exitCleanupInstalled = false;
+
+function stopAllLiveClusters(): void {
+  for (const cluster of liveEmbeddedPostgresClusters) {
+    if (cluster.stopping) continue;
+    cluster.stopping = true;
+    // Fire-and-forget, and it is important to be precise about what completes
+    // here: `embedded-postgres`' `stop()` spawns `taskkill` on win32 or sends
+    // `SIGINT` on posix and *then* awaits the child's exit. Both signal paths are
+    // synchronous libuv calls, so the signal really does land. The await is what
+    // does not complete — on `exit` there is no event loop, and on SIGINT the
+    // handler re-raises immediately — so nothing after the first await runs. That
+    // includes the data-directory removal `stopEmbeddedPostgresBounded` chains
+    // onto `stop()`. The orphaned directories are the reaper's problem
+    // (scripts/reap-embedded-test-postgres.mjs), which is exactly why it exists.
+    try {
+      void cluster.instance.stop().catch(() => {});
+    } catch {
+      // Best effort. The reaper in scripts/reap-embedded-test-postgres.mjs is
+      // the backstop when a hard kill leaves a cluster behind anyway.
+    }
+  }
+}
+
+function stopLiveClustersOnExit(): void {
+  if (exitCleanupInstalled) return;
+  exitCleanupInstalled = true;
+  process.once("exit", stopAllLiveClusters);
+  // SIGINT/SIGTERM run before `exit`. This module must not own the signal for the
+  // whole worker: vitest installs its own handlers in the worker process, and the
+  // previous `process.removeAllListeners(signal)` here stripped them. Re-raise the
+  // default disposition only when nothing else is listening, so the process still
+  // dies on Ctrl-C while an embedder keeps its own behaviour.
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => {
+      stopAllLiveClusters();
+      // `once` has already removed this listener, so a count of zero means this
+      // module was the only listener and the default disposition still applies.
+      if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    });
+  }
+}
+
+function trackLiveCluster(
+  instance: EmbeddedPostgresInstance,
+  dataDir: string,
+): LiveEmbeddedPostgresCluster {
+  const cluster: LiveEmbeddedPostgresCluster = { instance, dataDir };
+  liveEmbeddedPostgresClusters.add(cluster);
+  stopLiveClustersOnExit();
+  return cluster;
+}
+
+function releaseLiveCluster(instance: EmbeddedPostgresInstance): void {
+  for (const cluster of liveEmbeddedPostgresClusters)
+    if (cluster.instance === instance) liveEmbeddedPostgresClusters.delete(cluster);
+}
+
 async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
   port: number;
   dataDir: string;
@@ -218,6 +298,10 @@ async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
     try {
       await created.instance.initialise();
       await created.instance.start();
+      // Register here rather than in each caller: this is the single place a
+      // cluster comes up, so this is the only place that can promise "the set
+      // holds every cluster this module started and has not stopped".
+      trackLiveCluster(created.instance, created.dataDir);
       return { port: created.port, dataDir: created.dataDir, instance: created.instance };
     } catch (error) {
       lastError = formatEmbeddedPostgresError(error, {
@@ -242,6 +326,16 @@ async function startEmbeddedPostgresWithRetry(tempDirPrefix: string): Promise<{
 // so it does not need a real Postgres connection.
 export const __startEmbeddedPostgresWithRetryForTests = startEmbeddedPostgresWithRetry;
 export const __embeddedPostgresStartMaxAttemptsForTests = EMBEDDED_POSTGRES_START_MAX_ATTEMPTS;
+// The exit-cleanup bookkeeping, exposed so a test can prove the two properties
+// that matter without booting a real cluster: repeated start/stop cycles do not
+// grow the live set, and repeated starts install one `exit` listener rather than
+// one per cluster.
+export const __embeddedPostgresLifecycleForTests = {
+  liveClusterCount: () => liveEmbeddedPostgresClusters.size,
+  exitListenerCount: () => process.listenerCount("exit"),
+  releaseLiveCluster,
+  stopAllLiveClusters,
+};
 
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
   let started: { dataDir: string; instance: EmbeddedPostgresInstance } | null = null;
@@ -259,7 +353,11 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   } finally {
     if (started) {
       const { dataDir, instance } = started;
+      // Release *after* the stop settles. Deleting first would leave a window in
+      // which an interrupt during teardown finds a live cluster that is no longer
+      // tracked — precisely the leak this registry exists to prevent.
       await stopEmbeddedPostgresBounded(instance, () => cleanupEmbeddedPostgresTestDirs(dataDir));
+      releaseLiveCluster(instance);
     }
   }
 }
@@ -275,7 +373,8 @@ export async function startEmbeddedPostgresTestDatabase(
   tempDirPrefix: string,
 ): Promise<EmbeddedPostgresTestDatabase> {
   // The bounded retry hardens the cluster start against the port race. It throws
-  // with the real Postgres output if every attempt fails.
+  // with the real Postgres output if every attempt fails. The returned cluster is
+  // already registered for exit cleanup; callers release it once stopped.
   const { port, dataDir, instance } = await startEmbeddedPostgresWithRetry(tempDirPrefix);
 
   try {
@@ -294,10 +393,16 @@ export async function startEmbeddedPostgresTestDatabase(
         // a null socket.
         await closeRegisteredClients(connectionString);
         await stopEmbeddedPostgresBounded(instance, () => cleanupEmbeddedPostgresTestDirs(dataDir));
+        // Released after the stop settles, not before: an interrupt during
+        // teardown must still find this cluster tracked, or the exit path has
+        // nothing to stop and the cluster leaks — the exact failure this
+        // registry was added to prevent.
+        releaseLiveCluster(instance);
       },
     };
   } catch (error) {
     await stopEmbeddedPostgresBounded(instance, () => cleanupEmbeddedPostgresTestDirs(dataDir));
+    releaseLiveCluster(instance);
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${
         formatEmbeddedPostgresError(error, {

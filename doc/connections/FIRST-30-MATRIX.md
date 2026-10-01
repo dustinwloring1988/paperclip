@@ -60,6 +60,15 @@ whose tool/resource semantics match Paperclip grants: Linear, Notion, Sentry,
 Vercel, PostHog, Exa, Apify, Canva where available, Fireflies, and most Google
 Workspace reads.
 
+Figma also ships as direct MCP against `https://mcp.figma.com/mcp`. It was
+originally classified here as a vendor-deep wrapper because the Figma boundary
+depends on per-seat entitlement and per-user visibility; both of those are now
+carried by the hosted server plus Paperclip's user-scoped grant and action policy,
+so no wrapper is required. See [Figma](./FIGMA.md).
+
+Intercom also ships as direct MCP, but against **two** regional hosts with
+distinct OAuth issuers — see [Intercom](./INTERCOM.md).
+
 Use **OpenAPI-to-MCP shims** when the vendor has a documented REST/OpenAPI
 surface but no stable vendor MCP server: Datadog, Apollo.io, QuickBooks,
 Ramp/Brex, Zendesk, and portions of Salesforce/Microsoft 365 until their MCP
@@ -68,8 +77,12 @@ paths are stable.
 Use **vendor-deep wrappers** when the value or security boundary depends on app
 installation tokens, event validation, rich UI/action semantics, or
 domain-specific governance: GitHub, Slack, Google Workspace writes, Atlassian,
-Microsoft 365, Cloudflare, Figma, Stripe, Salesforce, HubSpot, Intercom, and
-PagerDuty.
+Microsoft 365, Cloudflare, Stripe, Salesforce, HubSpot, and PagerDuty.
+
+Figma and Intercom were listed here and have since shipped as direct MCP
+connections to each provider's own hosted remote MCP server. They are removed
+from this list rather than tracked twice. Exa and Apify remain direct MCP and are
+unchanged.
 
 ## Matrix
 
@@ -91,10 +104,10 @@ PagerDuty.
 | 14 | Vercel | A | Direct MCP or thin REST wrapper | Vercel OAuth | Team, project, environment, deployment filters | Read projects/deployments/log metadata, redeploy/cancel gated | Deployment webhooks | S3 |
 | 15 | PostHog | C | Hosted MCP OAuth or personal API key | OAuth token or personal API key secret ref | Project, read-only, feature-group, and tool filters | Query insights/errors/flags/experiments; governed writes | Optional insight/flag sync | S3 |
 | 16 | Datadog | C | OpenAPI-to-MCP shim first, deep wrapper later | API key + app key secret refs | Site, org, service, monitor, dashboard filters | Read metrics/logs/monitors, mute/unmute gated | Monitor/webhook events | S3 |
-| 17 | Figma | C | Vendor-deep wrapper; MCP for Dev Mode reads | Figma OAuth | Team, project, file, branch filters | Read files/comments/dev data, create comment | File/comment webhooks optional | S3 |
+| 17 | Figma | C | Direct MCP to Figma's hosted server (shipped; was vendor-deep wrapper) | Figma OAuth, customer-owned client | Team, project, file filters | Read files/comments/dev data, create comment | File/comment webhooks optional | S3 |
 | 18 | Canva | C | Direct app/MCP where available; Connect API wrapper | Canva OAuth | Team, folder, brand/template filters | Search/read designs, create design from template | Asset sync optional | S2 |
-| 19 | Exa | A | Direct MCP/API-key provider | API key secret ref | Domain allow/deny list, content category, rate limits | Web/neural search, fetch result content | No webhook; usage/activity only | S1 |
-| 20 | Apify | C | Direct MCP/API-token provider | API token secret ref | Actor allowlist, dataset/run filters | Run actor, read dataset, fetch status | Actor run completion webhook optional | S2 |
+| 19 | Exa | A | Direct MCP/API-key provider | OAuth or API key secret ref | None shipped (S1 public-web reads) | Web/neural search, fetch result content | No webhook; usage/activity only | S1 |
+| 20 | Apify | C | Direct MCP/API-token provider | OAuth or API token secret ref | Account, actor, dataset filters | Run actor, read dataset, fetch status | Actor run completion webhook optional | S2 |
 | 21 | HubSpot | B | Direct MCP/REST wrapper | HubSpot OAuth | Portal, pipeline, object type, owner/team filters | Search contacts/companies/deals, create note/task/deal gated | CRM webhooks | S3 |
 | 22 | Salesforce | D | Vendor-deep wrapper; OpenAPI/GraphQL where useful | Salesforce OAuth | Org, object, record type, field-level filters | Search/read records, create task/note/opportunity draft | Platform events/webhooks | S4 |
 | 23 | Attio | D | Direct MCP/REST wrapper | Attio OAuth | Workspace, list, object, attribute filters | Search records, create note/task/update stage gated | Workspace webhook optional | S3 |
@@ -102,7 +115,7 @@ PagerDuty.
 | 25 | Stripe | D | Vendor-deep wrapper using Stripe agent toolkit | OAuth or restricted key secret ref | Account, mode, object type, refund/payment capability filters | Search customers/subs/invoices, create invoice/refund draft | Stripe webhooks mandatory for state sync | S4 |
 | 26 | QuickBooks | D | OpenAPI-to-MCP shim, Intuit wrapper later | Intuit OAuth | Realm/company, entity/report filters | Read reports/invoices/vendors, create invoice draft | Intuit webhooks optional | S4 |
 | 27 | Ramp/Brex | D | OpenAPI-to-MCP shim | OAuth/API token depending provider | Entity, department, cardholder, merchant/category filters | Read transactions/cards/reimbursements, draft memo/category update | Transaction webhooks optional | S4 |
-| 28 | Intercom | B | Direct MCP/REST wrapper | Intercom OAuth | Workspace, inbox/team, tag, conversation view filters | Search conversations/users, draft/reply/assign gated | Conversation/contact webhooks | S3 |
+| 28 | Intercom | B | Direct MCP to Intercom's hosted server, one method per data region (shipped; no REST wrapper) | Intercom OAuth | Workspace, inbox, team filters | Search conversations/users, draft/reply/assign gated | Conversation/contact webhooks | S3 |
 | 29 | Zendesk | E | OpenAPI-to-MCP shim first, app wrapper later | Zendesk OAuth | Subdomain, brand, group, view, ticket tag filters | Search/read tickets/users, comment/assign/status gated | Ticket webhooks | S3 |
 | 30 | Fireflies | E | Direct MCP/API wrapper; choose over Granola for public API maturity | OAuth/API key secret ref | Team, user, meeting folder/source filters | Search/read transcripts/summaries, export action items | Meeting-completed webhook/sync | S2 |
 

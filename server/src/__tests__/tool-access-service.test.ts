@@ -51,6 +51,7 @@ import {
 } from "@paperclipai/db";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import {
+  APP_DEFINITIONS,
   APP_STORE_HIDDEN_SLUGS,
   GITHUB_CONNECTOR_PROFILES,
   GOOGLE_WORKSPACE_CONNECTOR_PROFILE_IDS,
@@ -5092,7 +5093,7 @@ describeEmbeddedPostgres("tool access service", () => {
         "youcom",
       ]),
     );
-    expect(res.body.apps).toHaveLength(56);
+    expect(res.body.apps).toHaveLength(60);
     expect(
       res.body.apps.find((app: { slug: string }) => app.slug === "gmail")
         .ownershipAvailability,
@@ -5270,6 +5271,174 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(requests.some((request) => request.url.endsWith("/register"))).toBe(
       false,
     );
+  });
+
+  it("asks for Intercom's hinted metadata document before any derived candidate", async () => {
+    // Intercom serves no RFC 9728 protected-resource metadata and its 401 on
+    // `/mcp` carries no `resource_metadata`, so `challengeOAuthHints` yields
+    // nothing. `wellKnownMetadataUrls` still appends the origin-form RFC 8414
+    // document as its last derived candidate
+    // (`server/src/services/tool-access.ts:551`), and that URL answers — so this
+    // fixture cannot prove the hint is *required*. What it does prove is the
+    // property the manifest is actually written for: the hinted document is asked
+    // for FIRST, ahead of the two derived candidates that 404/401 against the live
+    // host. Drop `defaults.metadataUrl` and the same preflight still resolves, but
+    // only after those wasted probes — which is the regression this guards.
+    const requests: string[] = [];
+    const service = createTestToolAccessService(db, {
+      now: () => new Date("2026-08-26T12:00:00.000Z"),
+      remoteHttpRequest: async (url) => {
+        requests.push(url);
+        if (url === "https://mcp.intercom.com/mcp")
+          return new Response(
+            JSON.stringify({ error: "invalid_token" }),
+            { status: 401, headers: { "content-type": "application/json" } },
+          );
+        if (
+          url ===
+          "https://mcp.intercom.com/.well-known/oauth-authorization-server"
+        )
+          return new Response(
+            JSON.stringify({
+              issuer: "https://mcp.intercom.com",
+              authorization_endpoint: "https://mcp.intercom.com/authorize",
+              token_endpoint: "https://mcp.intercom.com/token",
+              registration_endpoint: "https://mcp.intercom.com/register",
+              grant_types_supported: ["authorization_code", "refresh_token"],
+              code_challenge_methods_supported: ["S256"],
+              token_endpoint_auth_methods_supported: [
+                "client_secret_basic",
+                "client_secret_post",
+                "none",
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    const result = await service.preflightGalleryAppMetadata(
+      "intercom",
+      "mcp-oauth-us",
+    );
+
+    // `registrationAdvertised` matters most: DCR has nothing to register against
+    // without it. Note these values are also reachable via the derived origin-form
+    // candidate, so they document the resolution rather than prove hint usage —
+    // the ordering assertions below are what guard the hint.
+    expect(result).toMatchObject({
+      galleryKey: "intercom",
+      methodKey: "mcp-oauth-us",
+      serverUrl: "https://mcp.intercom.com/mcp",
+      endpointReachable: true,
+      oauth: {
+        metadataFound: true,
+        registrationAdvertised: true,
+        clientIdMetadataDocumentSupported: false,
+      },
+      checkedAt: "2026-08-26T12:00:00.000Z",
+    });
+    // The endpoint probe comes first, then the hint — ahead of every derived
+    // candidate. The preflight still drains the rest afterwards.
+    expect(requests[0]).toBe("https://mcp.intercom.com/mcp");
+    expect(requests[1]).toBe(
+      "https://mcp.intercom.com/.well-known/oauth-authorization-server",
+    );
+    const derivedCandidates = requests
+      .slice(2)
+      .filter((url) => url !== "https://mcp.intercom.com/.well-known/oauth-authorization-server");
+    expect(
+      requests.lastIndexOf(
+        "https://mcp.intercom.com/.well-known/oauth-authorization-server",
+      ),
+    ).toBe(1);
+    expect(derivedCandidates.length).toBeGreaterThan(0);
+  });
+
+  it("still resolves Intercom without the hint, but only after the derived candidates", async () => {
+    // The counterpart to the test above, and the reason the manifest names the
+    // document instead of leaving it to derivation: drop `defaults.metadataUrl`
+    // and the preflight still succeeds, because `wellKnownMetadataUrls` appends
+    // the origin form unconditionally. It just reaches it third, behind two probes
+    // that fail against the live host. This test pins that honest fallback so a
+    // future change to `wellKnownMetadataUrls` cannot silently strand Intercom.
+    const method = APP_DEFINITIONS.find((app) => app.slug === "intercom")!.methods.find(
+      (entry) => entry.key === "mcp-oauth-us",
+    )!;
+    const originalMetadataUrl = method.defaults!.metadataUrl;
+    const requests: string[] = [];
+    try {
+      delete method.defaults!.metadataUrl;
+      const service = createTestToolAccessService(db, {
+        now: () => new Date("2026-08-26T12:00:00.000Z"),
+        remoteHttpRequest: async (url) => {
+          requests.push(url);
+          if (url === "https://mcp.intercom.com/mcp")
+            return new Response(JSON.stringify({ error: "invalid_token" }), {
+              status: 401,
+              headers: { "content-type": "application/json" },
+            });
+          if (
+            url ===
+            "https://mcp.intercom.com/.well-known/oauth-authorization-server"
+          )
+            return new Response(
+              JSON.stringify({
+                issuer: "https://mcp.intercom.com",
+                authorization_endpoint: "https://mcp.intercom.com/authorize",
+                token_endpoint: "https://mcp.intercom.com/token",
+                registration_endpoint: "https://mcp.intercom.com/register",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          return new Response(null, { status: 404 });
+        },
+      });
+
+      const result = await service.preflightGalleryAppMetadata(
+        "intercom",
+        "mcp-oauth-us",
+      );
+      expect(result.oauth).toMatchObject({
+        metadataFound: true,
+        registrationAdvertised: true,
+      });
+      // Reached only after the derived candidates were tried.
+      expect(requests.indexOf(
+        "https://mcp.intercom.com/.well-known/oauth-authorization-server",
+      )).toBeGreaterThan(1);
+    } finally {
+      method.defaults!.metadataUrl = originalMetadataUrl;
+    }
+  });
+
+  it("keeps each Intercom region's hint on that region's own host", async () => {
+    const requestsByMethod: Record<string, string[]> = {};
+    for (const methodKey of ["mcp-oauth-us", "mcp-oauth-eu"]) {
+      const requests: string[] = [];
+      requestsByMethod[methodKey] = requests;
+      const service = createTestToolAccessService(db, {
+        remoteHttpRequest: async (url) => {
+          requests.push(url);
+          return new Response(null, { status: 404 });
+        },
+      });
+      await service.preflightGalleryAppMetadata("intercom", methodKey);
+    }
+
+    // The two regions are separate deployments with separate issuers. A hint
+    // pointed at the US document would resolve endpoints that issue tokens for
+    // the wrong region, and a preflight that probed the EU host last would not
+    // notice.
+    expect(requestsByMethod["mcp-oauth-us"]?.slice(0, 2)).toEqual([
+      "https://mcp.intercom.com/mcp",
+      "https://mcp.intercom.com/.well-known/oauth-authorization-server",
+    ]);
+    expect(requestsByMethod["mcp-oauth-eu"]?.slice(0, 2)).toEqual([
+      "https://mcp.eu.intercom.com/mcp",
+      "https://mcp.eu.intercom.com/.well-known/oauth-authorization-server",
+    ]);
   });
 
 

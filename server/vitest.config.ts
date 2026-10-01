@@ -20,10 +20,16 @@ export default defineConfig({
     // beforeAll/afterAll. Under the loaded serial shard (maxWorkers=1) the
     // graceful shutdown can occasionally cross vitest's default 10s hookTimeout,
     // producing flaky "Hook timed out in 10000ms" afterAll failures on CI. Give
-    // the boot/teardown hooks generous headroom; 30s is far above the observed
-    // worst-case teardown yet still catches a genuinely hung hook. teardownTimeout
-    // mirrors it for the same reason.
-    hookTimeout: 30000,
+    // the boot/teardown hooks generous headroom; teardownTimeout mirrors it for
+    // the same reason.
+    //
+    // The boot budget tracks EMBEDDED_POSTGRES_TEST_TIMEOUT_MS (90s) in
+    // @paperclipai/db, which is the module's own documented ceiling: that file
+    // measures the cost class at "well under 10s" clean but up to 4.9x longer on
+    // a contended runner, which is ~49s and already past the previous 30s. A
+    // window tighter than the module's own budget turns a slow-but-healthy boot
+    // into a phantom hang, and the suite then fails before running a single test.
+    hookTimeout: 120000,
     teardownTimeout: 30000,
     // The route/authz suites import very large modules (for example
     // src/routes/issues.ts and its dependency graph). The first test in each

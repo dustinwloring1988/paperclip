@@ -342,7 +342,25 @@ function runVitest(args, label, testShard = null) {
     console.log(`[test:run] chat shard ${testShard.index + 1}/${testShard.count}: ${selected.tests.length}/${collected.length} tests, ${selected.lines.length} source lines; exact filter coverage verified`);
     args.push("--allowOnly=false");
   }
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...args], {
+  // Embedded-Postgres suites boot a real cluster in beforeAll. Vitest 4's
+  // default hook budget is 20s, which this cost class cannot meet: a boot that
+  // takes ~25-50s under load (the cost class is documented at up to 4.9x its
+  // clean time in @paperclipai/db) then fails as a phantom "Hook timed out"
+  // before the suite runs a single test. So pass the budget explicitly.
+  //
+  // Read this before "simplifying" it away: a project-level `hookTimeout` wins
+  // over this CLI flag. `packages/db/vitest.config.ts` declares 180000, and when
+  // this script runs vitest from the repo root the root config's `projects` list
+  // is what resolves — so for @paperclipai/db the 180s project value is what
+  // actually runs and this flag has no effect. The flag protects the projects
+  // that declare no hookTimeout of their own, and it is not a substitute for the
+  // per-project value: do not delete the 180000 in packages/db/vitest.config.ts
+  // on the strength of seeing this flag. Set PAPERCLIP_VITEST_HOOK_TIMEOUT_MS to
+  // override the default here.
+  const hookTimeoutArgs = process.env.PAPERCLIP_VITEST_HOOK_TIMEOUT_MS
+    ? ["--hook-timeout", process.env.PAPERCLIP_VITEST_HOOK_TIMEOUT_MS]
+    : ["--hook-timeout", "120000"];
+  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...sourceOnlyVitestArgs, ...hookTimeoutArgs, ...args], {
     cwd: repoRoot,
     env,
     stdio: "inherit",

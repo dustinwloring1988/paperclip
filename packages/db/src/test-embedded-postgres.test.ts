@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  __embeddedPostgresLifecycleForTests as lifecycle,
   __embeddedPostgresStartMaxAttemptsForTests as MAX_ATTEMPTS,
   __setEmbeddedPostgresCtorProviderForTests,
   __startEmbeddedPostgresWithRetryForTests as startWithRetry,
@@ -30,6 +31,7 @@ function makeFakeCtor(failFirst: number) {
 
   class FakeEmbeddedPostgres {
     private readonly options: FakeOptions;
+    stopCalls = 0;
     constructor(options: FakeOptions) {
       this.options = options;
       constructed.push(options);
@@ -44,7 +46,9 @@ function makeFakeCtor(failFirst: number) {
         throw new Error();
       }
     }
-    async stop(): Promise<void> {}
+    async stop(): Promise<void> {
+      this.stopCalls += 1;
+    }
   }
 
   return { ctor: FakeEmbeddedPostgres, constructed };
@@ -109,5 +113,59 @@ describe("startEmbeddedPostgresWithRetry", () => {
     // The thrown message carries the captured Postgres output, not only the
     // generic "embedded Postgres startup failed" text.
     expect((error as Error).message).toContain("Address already in use");
+  });
+
+  it("does not grow the live-cluster set or the exit listener across start/stop cycles", async () => {
+    // Every cluster this module starts is tracked for exit cleanup, and the
+    // cleanup runs on both the signal path and `exit`. Two properties have to hold
+    // no matter how many times a suite starts and stops a cluster: the set must
+    // not accumulate, and the process must not accumulate `exit` listeners (which
+    // would eventually trip vitest's MaxListeners warning).
+    const exitListenersBefore = process.listenerCount("exit");
+    const liveBefore = lifecycle.liveClusterCount();
+    const exitListenerCounts: number[] = [];
+
+    for (const attempt of [1, 2, 3]) {
+      const { ctor } = makeFakeCtor(0);
+      __setEmbeddedPostgresCtorProviderForTests(async () => ctor);
+      const started = await startWithRetry(`paperclip-cycle-${attempt}-`);
+      // A running cluster is tracked, exactly one entry more than before.
+      expect(lifecycle.liveClusterCount()).toBe(liveBefore + 1);
+      // Repeated starts install the cleanup once, not once per cluster. The
+      // baseline may already include an install from an earlier test in this file,
+      // so the assertion is that the count never moves again.
+      exitListenerCounts.push(lifecycle.exitListenerCount());
+      expect(lifecycle.exitListenerCount()).toBeLessThanOrEqual(exitListenersBefore + 1);
+
+      await started.instance.stop();
+      fs.rmSync(started.dataDir, { recursive: true, force: true });
+      // Releasing is what a caller's `cleanup()` does after its stop settles.
+      lifecycle.releaseLiveCluster(started.instance);
+      expect(lifecycle.liveClusterCount()).toBe(liveBefore);
+    }
+
+    expect(new Set(exitListenerCounts).size).toBe(1);
+    __setEmbeddedPostgresCtorProviderForTests(null);
+  });
+
+  it("issues one stop per cluster even when the exit path runs twice", async () => {
+    // On `exit` there is no event loop, and on SIGINT the handler re-raises
+    // immediately, so `stop()` never settles and the guard that clears the
+    // internal handle never runs. Without an explicit idempotence marker the
+    // second pass would issue a second `taskkill` for an already-dying pid.
+    const { ctor } = makeFakeCtor(0);
+    __setEmbeddedPostgresCtorProviderForTests(async () => ctor);
+    const started = await startWithRetry("paperclip-idempotent-stop-");
+
+    lifecycle.stopAllLiveClusters();
+    lifecycle.stopAllLiveClusters();
+    lifecycle.stopAllLiveClusters();
+
+    const instance = started.instance as unknown as { stopCalls: number };
+    expect(instance.stopCalls).toBe(1);
+
+    lifecycle.releaseLiveCluster(started.instance);
+    fs.rmSync(started.dataDir, { recursive: true, force: true });
+    __setEmbeddedPostgresCtorProviderForTests(null);
   });
 });
