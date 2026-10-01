@@ -17211,6 +17211,88 @@ export function heartbeatService(
     }
   }
 
+  // Writes the pre-flight spend estimate for a run that has passed every
+  // admission gate and is about to execute.
+  //
+  // Two properties are load-bearing here, and both are about not letting this
+  // measurement hurt the work it is measuring.
+  //
+  // A cost estimate must never prevent work. Estimation reads a percentile off
+  // a table that a cost write can contend with, and any failure there — a
+  // timeout, a serialization failure, an unavailable connection — is not a
+  // reason to cancel an agent that is otherwise ready to run. Every failure is
+  // logged and swallowed, and the run proceeds with a null estimate, which is
+  // the same value a cold-start agent gets. The estimate is observability, not
+  // a gate, and it is called only after the claim transaction commits — see the
+  // call site — so every cancellation that can abandon a queued run happens
+  // before it. One path remains open afterwards: executeRun releases a claimed
+  // run back to `queued` when scheduling suppresses it, and that run never
+  // executes. Its estimate stands, which is correct, because the estimate
+  // records what the run was about to cost rather than what it eventually did.
+  //
+  // Write once. claimQueuedRun is retried whenever a claimed run is released
+  // back to queued (see releaseRunClaimedJustBeforeSuppression) and on
+  // recovery. Re-estimating on a retry would compare a later run against a
+  // baseline that had already absorbed the first attempt's partial spend, and
+  // estimate-vs-actual would stop meaning anything. The UPDATE is therefore
+  // conditional on the column still being null, which makes the first estimate
+  // the run's estimate permanently regardless of how many times claiming is
+  // attempted. The run's own id is excluded from its comparison class so a
+  // re-claim cannot price itself against itself.
+  async function stampRunCostEstimate(run: typeof heartbeatRuns.$inferSelect) {
+    try {
+      const estimate = await costService(db, budgetHooks).estimateRunCost(
+        run.companyId,
+        run.agentId,
+        { excludeRunId: run.id },
+      );
+      // Null means "not enough comparable history". Leaving the column null is
+      // the correct outcome, not a write of zero and not a reason to retry.
+      if (estimate.estimatedCents === null) return null;
+      const [stamped] = await db
+        .update(heartbeatRuns)
+        .set({
+          estimatedCostCents: estimate.estimatedCents,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(heartbeatRuns.id, run.id),
+            eq(heartbeatRuns.companyId, run.companyId),
+            isNull(heartbeatRuns.estimatedCostCents),
+          ),
+        )
+        .returning({ estimatedCostCents: heartbeatRuns.estimatedCostCents });
+      // No row means a concurrent claim already wrote an estimate. That claim's
+      // number stands; overwriting it would be exactly the drift write-once
+      // exists to prevent.
+      if (!stamped) return null;
+      await appendRunEvent(run, {
+        eventType: "cost.estimate",
+        stream: "system",
+        level: "info",
+        message: `Estimated ${stamped.estimatedCostCents} cents for this run before execution`,
+        payload: {
+          estimatedCostCents: stamped.estimatedCostCents,
+          upperBoundCents: estimate.upperBoundCents,
+          sampleSize: estimate.sampleSize,
+          lookbackDays: estimate.lookbackDays,
+          method: estimate.method,
+        },
+      });
+      return stamped.estimatedCostCents;
+    } catch (error) {
+      // Level warn, not error: the run is proceeding normally, and nothing is
+      // broken about the work. The run id is the handle an operator needs to see
+      // that this particular run has no baseline.
+      logger.warn(
+        { err: error, runId: run.id, agentId: run.agentId },
+        "claimQueuedRun: cost estimate unavailable; continuing without one",
+      );
+      return null;
+    }
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
@@ -17790,6 +17872,15 @@ export function heartbeatService(
           });
         });
     if (!claimed) return null;
+
+    // The claim is committed, so this run is going to execute. The stamp lives
+    // here, immediately after the single `if (!claimed)` funnel, rather than
+    // earlier in the gate sequence: between an early position and here there are
+    // still exits that cancel or abandon the run (a stale-queue discard, a
+    // queued-comment cancellation, an issue-execution conflict), and an estimate
+    // on a run that never executed would be a baseline recorded against work that
+    // did not happen.
+    await stampRunCostEstimate(claimed);
 
     publishLiveEvent({
       companyId: claimed.companyId,

@@ -22,6 +22,29 @@ export interface CostDateRange {
 }
 
 const METERED_BILLING_TYPE = "metered_api";
+
+/**
+ * How long a comparable run stays comparable. Bounded on purpose: see
+ * estimateRunCost.
+ */
+const RUN_ESTIMATE_LOOKBACK_DAYS = 30;
+
+/**
+ * The smallest population that can produce two distinct numbers.
+ *
+ * With one sample, p50 and p90 are the same observation. With two they are the
+ * lower and upper observation, which is a range, not a distribution. Three is
+ * the first size at which the median is an interior point and the band carries
+ * information the point estimate does not.
+ */
+const MIN_RUN_ESTIMATE_SAMPLES = 3;
+
+/**
+ * Machine-readable name of the estimator, stored beside the number so a stored
+ * estimate can be re-interpreted if the estimator is ever changed. Written into
+ * the run log event that accompanies a stamped estimate.
+ */
+export const RUN_COST_ESTIMATE_METHOD = "agent_run_p50_p90_billed";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
 
 /**
@@ -93,6 +116,69 @@ function runIssueLinkCte(db: Db, companyId: string) {
     )
     .orderBy(activityLog.runId, desc(activityLog.createdAt))
     .as("run_issue_links");
+}
+
+/**
+ * The per-run cost CTE that every run-level percentile in this file reads.
+ *
+ * cost_events are collapsed to one row per heartbeat_runs.id BEFORE any
+ * percentile is taken, because a run emits one cost event per model call, so a
+ * percentile over raw rows measures the size of a single billing event rather
+ * than what a run costs. The scope filters arrive as arguments rather than
+ * being hardcoded, so `runSpendDistribution` and `estimateRunCost` cannot drift
+ * into measuring two different populations.
+ *
+ * Tables stay unaliased so the drizzle-rendered column references handed in by
+ * `costRangeConditions` remain valid inside this raw fragment.
+ *
+ * `agentId` filters on heartbeat_runs rather than on cost_events, even though
+ * cost_events.agent_id is not null and leads the company/agent index. A run's
+ * cost rows have to be selected or rejected as a unit; filtering on the cost
+ * row's own agent could split one run's total across two populations, which is
+ * the exact fan-out this CTE exists to prevent.
+ *
+ * `billedOnly` narrows the population to runs whose cost is actually known and
+ * actually metered. It matters for the estimator rather than for the
+ * distribution: `normalizeBilledCostCents` (server/src/services/heartbeat.ts)
+ * records `subscription_included` and `unpriced` spend as 0, because a run on a
+ * subscription really does add nothing to the bill and an unpriced turn has no
+ * receipt at all. Those zeros are honest in a spend *distribution* — that is
+ * what incremental cost is — but as an estimate population they are poison:
+ * three subscription runs give p50 = 0, and 0 is a number an operator would read
+ * as "this run is free". The estimator passes `billedOnly` and therefore returns
+ * null for those agents instead.
+ */
+function perRunCostCte(
+  conditions: ReturnType<typeof eq>[],
+  scope: { agentId?: string; excludeRunId?: string; billedOnly?: boolean } = {},
+) {
+  return sql`
+    WITH per_run_cost AS (
+      SELECT
+        cost_events.heartbeat_run_id AS run_id,
+        heartbeat_runs.agent_id AS agent_id,
+        sum(cost_events.cost_cents)::bigint AS run_cost_cents
+      FROM cost_events
+      JOIN heartbeat_runs
+        ON heartbeat_runs.id = cost_events.heartbeat_run_id
+        AND heartbeat_runs.company_id = cost_events.company_id
+      WHERE ${and(
+        ...conditions,
+        isNotNull(costEvents.heartbeatRunId),
+        scope.agentId ? eq(heartbeatRuns.agentId, scope.agentId) : undefined,
+        // Lets a re-claim of a partially executed run keep its own spend out of
+        // the population it is being priced against.
+        scope.excludeRunId
+          ? sql`cost_events.heartbeat_run_id <> ${scope.excludeRunId}`
+          : undefined,
+        scope.billedOnly
+          ? sql`cost_events.billing_type <> 'subscription_included'
+               AND cost_events.cost_status = 'reported'`
+          : undefined,
+      )}
+      GROUP BY cost_events.heartbeat_run_id, heartbeat_runs.agent_id
+    )
+  `;
 }
 
 function currentUtcMonthWindow(now = new Date()) {
@@ -689,25 +775,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
      */
     runSpendDistribution: async (companyId: string, range?: CostDateRange) => {
       const conditions = costRangeConditions(companyId, range);
-
-      // Sum cost_events to one row per run BEFORE any percentile is taken.
-      // Tables stay unaliased so the drizzle-rendered column references above
-      // remain valid inside this raw fragment.
-      const perRunCost = sql`
-        WITH per_run_cost AS (
-          SELECT
-            cost_events.heartbeat_run_id AS run_id,
-            heartbeat_runs.agent_id AS agent_id,
-            sum(cost_events.cost_cents)::bigint AS run_cost_cents
-          FROM cost_events
-          JOIN heartbeat_runs
-            ON heartbeat_runs.id = cost_events.heartbeat_run_id
-            AND heartbeat_runs.company_id = cost_events.company_id
-          WHERE ${and(...conditions)}
-            AND cost_events.heartbeat_run_id IS NOT NULL
-          GROUP BY cost_events.heartbeat_run_id, heartbeat_runs.agent_id
-        )
-      `;
+      const perRunCost = perRunCostCte(conditions);
 
       const overallQuery = sql`
         ${perRunCost}
@@ -773,6 +841,123 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
           runCount: Number(row.runCount ?? 0),
           p95Cents: asNumberOrNull(row.p95Cents),
         })),
+      };
+    },
+
+    /**
+     * A pre-flight point estimate for what the next run by this agent is
+     * expected to cost, plus a conservative band around it.
+     *
+     * This is the number written to heartbeat_runs.estimated_cost_cents at
+     * claim time so an operator can later compare estimate against actual.
+     *
+     * Comparability class: same company, same agent. Per-agent is chosen over
+     * per-(agent, model) and per-(agent, issue-type) deliberately:
+     *
+     * - Model is not knowable at claim time. The adapter picks the model during
+     *   execution, so a model-conditioned estimate would have to be conditional
+     *   on something the claiming path does not have yet. It would also shrink
+     *   the sample for every agent that rotates models, which pushes real agents
+     *   into cold start.
+     * - Issue type is not a column. The closest thing is a priority or status
+     *   string, neither of which is a cost driver, and joining it in would make
+     *   the population so thin that most agents would fall under the minimum
+     *   sample size.
+     * - Per-agent is also the unit the budget service already enforces against,
+     *   so the estimate and the cap it feeds are scoped the same way.
+     *
+     * Point estimate: median (p50), not mean. This feature exists to catch
+     * runaway loops, and a runaway loop IS an outlier. A mean is dragged upward
+     * by exactly the runs this feature wants to flag, so the "expected" cost
+     * would rise every time a loop happened and the estimate would become a
+     * record of past failures rather than a prediction of normal work. The
+     * median of per-run totals is unmoved by one run costing a hundred times
+     * its peers. The band is p90 rather than the observed max for the same
+     * reason: max is a single sample wearing a hat.
+     *
+     * Lookback is bounded at 30 days. Agents change adapters, models, and
+     * prompts; an estimate carried over from a configuration the agent no
+     * longer runs is worse than no estimate. A month keeps enough recent runs
+     * for a percentile while discarding the stale tail.
+     *
+* The population is metered runs whose cost the provider actually reported,
+      * so an agent that has never spent anything has no comparable history. Note
+      * this is per cost event and applied before the per-run SUM: a run whose
+      * events mix billing types contributes only its metered portion, which is
+      * what makes the mixed-agent case land on a real number instead of a
+      * subscription-flattened zero.
+     *
+     * Cold start returns null, never a guess. A fabricated estimate would be
+     * written as this run's baseline and then judged against actual spend
+     * later, which is the exact failure the null is meant to prevent: an
+     * absence of data has to be visible as an absence, not smoothed into a
+     * number. Below MIN_RUN_ESTIMATE_SAMPLES the sample is too small for p50
+     * and p90 to be anything but the same one or two observations wearing two
+     * different names, so the estimate is withheld rather than reported with a
+     * confidence it does not have.
+     */
+    estimateRunCost: async (
+      companyId: string,
+      agentId: string,
+      options: { lookbackDays?: number; excludeRunId?: string; now?: Date } = {},
+    ) => {
+      const lookbackDays = options.lookbackDays ?? RUN_ESTIMATE_LOOKBACK_DAYS;
+      const now = options.now ?? new Date();
+      const conditions = costRangeConditions(companyId, {
+        from: new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000),
+        to: now,
+      });
+
+      // Same CTE, same percentile machinery as runSpendDistribution, narrowed to
+      // one agent and to runs whose cost is metered and actually reported. Only p50
+      // and p90 are selected because those are the two numbers the estimator
+      // reports; there is no second percentile definition in this file that could
+      // disagree with the distribution endpoint.
+      const query = sql`
+        ${perRunCostCte(conditions, {
+          agentId,
+          excludeRunId: options.excludeRunId,
+          billedOnly: true,
+        })}
+        SELECT
+          count(*)::int AS "sampleSize",
+          round(percentile_cont(0.50) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p50Cents",
+          round(percentile_cont(0.90) WITHIN GROUP (ORDER BY run_cost_cents)::numeric)::bigint AS "p90Cents"
+        FROM per_run_cost
+      `;
+
+      const result = await db.execute(query);
+      const row = (Array.isArray(result) ? result[0] : undefined) as
+        | {
+            sampleSize?: number | string | null;
+            p50Cents?: number | string | null;
+            p90Cents?: number | string | null;
+          }
+        | undefined;
+      const sampleSize = Number(row?.sampleSize ?? 0);
+      const hasEnoughHistory = sampleSize >= MIN_RUN_ESTIMATE_SAMPLES;
+      const pointEstimate = hasEnoughHistory ? asNumberOrNull(row?.p50Cents) : null;
+      // Belt and braces against the invariant the column comment promises. The
+      // `billedOnly` population should make a zero median impossible — a
+      // subscription or unpriced run is excluded outright, so the remaining rows
+      // each carry real metered spend — but "the aggregate should never be zero"
+      // is not a promise worth relying on when the failure mode is writing a
+      // fabricated 0 into a column whose whole contract is that null means
+      // unknown and zero means free.
+      const estimatedCents = pointEstimate !== null && pointEstimate > 0 ? pointEstimate : null;
+
+      return {
+        companyId,
+        agentId,
+        // Null, not 0. No comparable history is not the same as "this run is
+        // free", and the column that stores this must keep that distinction.
+        estimatedCents,
+        upperBoundCents: estimatedCents === null ? null : asNumberOrNull(row?.p90Cents),
+        // Still reported at any sample size: a caller can tell "no history" from
+        // "barely any history" without a second query.
+        sampleSize,
+        lookbackDays,
+        method: RUN_COST_ESTIMATE_METHOD,
       };
     },
 

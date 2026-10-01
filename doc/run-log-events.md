@@ -267,6 +267,46 @@ or message content. The event establishes the accounting baseline; it is not a
 new billable usage receipt or a user-facing provider warning. Other provider
 identity checks remain in force.
 
+## Pre-flight cost estimate
+
+`claimQueuedRun` stamps one `cost.estimate` event on the run it is about to
+execute, immediately after the claim transaction commits and before provider
+execution starts. Every cancellation that can abandon a still-queued run — an
+unresolved blocker, a budget hard-stop, a stale queue, a pause hold, a
+queued-comment discard — returns before the stamp, so none of them carries an
+estimate. One later path remains open: `executeRun` releases a claimed run back
+to `queued` when scheduling suppresses it, and that run never executes. Its
+estimate stands, because the estimate records what the run was about to cost,
+not what it eventually did.
+
+The estimate is the median per-run spend of that agent's comparable **metered**
+runs over a bounded lookback, with the p90 recorded alongside as an upper bound.
+Runs whose cost is `subscription_included` or `unpriced` are excluded from that
+population: they are recorded at zero incremental cost, which is honest in a
+spend report and meaningless as a price. An agent whose comparable runs are all
+subscription-based therefore gets no estimate rather than an estimate of zero.
+
+Comparability is per agent: the run being stamped is excluded from its own
+comparison class so a re-claim cannot price itself against itself, and the write
+is conditional on the column still being null so the first estimate is the run's
+estimate permanently regardless of how many times claiming is retried.
+
+A `null` estimate is the correct outcome for an agent with too little history. It
+is not written as zero, and a failure to estimate is logged at `warn` and the run
+proceeds: a cost estimate must never prevent work.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `estimatedCostCents` | number | Median per-run spend of comparable runs. |
+| `upperBoundCents` | number | p90 of the same population. |
+| `sampleSize` | number | Comparable runs behind the estimate. |
+| `lookbackDays` | number | Window the comparison drew from. |
+| `method` | string | Name of the estimator, so a later change is visible in the log. |
+
+This event carries no prompt, provider credential, or message content. It is a
+run-log row in the local `heartbeat_run_events` table, not a first-party telemetry
+event and not an observability span.
+
 ## AI subscription contention
 
 A fresh task execution cannot enter this wait. A run that already entered this

@@ -44,11 +44,21 @@ export const heartbeatRuns = pgTable(
     // from cost_events at read time. Dual-writing a spend column is how the two
     // drift.
     //
-    // NOT YET WRITTEN. The measurement layer that produces the estimate ships in
-    // the next phase; until a writer lands, every row here is null. Read it as
-    // null, never as zero. The column is added now while the table change is
-    // additive and unpopulated, so the estimate writer does not need a second
-    // migration on a table this hot.
+    // Written once by claimQueuedRun (stampRunCostEstimate) immediately after the
+    // claim transaction commits and before execution starts, from the median of
+    // this agent's recent metered per-run totals. Written once means written once:
+    // the UPDATE is conditional on this column still being null, so a re-claim
+    // after a release or a recovery never moves the baseline an operator is
+    // comparing actual spend against.
+    //
+    // Null here means "no estimate", NOT "this run cost nothing". It is the value
+    // for an agent with no comparable history (cold start), for an estimate that
+    // could not be produced, for every run created before the writer shipped, and
+    // for an agent whose comparable runs are all subscription-included or
+    // unpriced — those are recorded at zero incremental cost, which is honest in a
+    // spend report and meaningless as a price. Read it as null, never as zero.
+    // Callers that coerce it to 0 turn "unknown" into "free", and a free run is
+    // the one outcome that would justify no cap.
     estimatedCostCents: integer("estimated_cost_cents"),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
     resultJson: jsonb("result_json").$type<Record<string, unknown>>(),
